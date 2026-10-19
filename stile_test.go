@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -76,6 +77,9 @@ func svcCookie(t *testing.T, app *App, username, host string) *http.Cookie {
 
 func fwdReq(path, host, uri string) *http.Request {
 	r := httptest.NewRequest("GET", path, nil)
+	// A real forward_auth subrequest carries the protected app's original
+	// Host header, never the portal's.
+	r.Host = host
 	r.Header.Set("X-Forwarded-Method", "GET")
 	r.Header.Set("X-Forwarded-Proto", "https")
 	r.Header.Set("X-Forwarded-Host", host)
@@ -226,6 +230,7 @@ func TestStoreDeleteLastCredentialRefused(t *testing.T) {
 func TestVerifyRequiresForwardAuthContext(t *testing.T) {
 	_, h := testApp(t)
 	r := httptest.NewRequest("GET", "/verify", nil)
+	r.Host = "other.example.com"
 	r.Header.Set("Accept", "text/html")
 	r.Header.Set("X-Forwarded-Host", "evil-controlled.example.com")
 	r.Header.Set("X-Forwarded-Uri", "/x")
@@ -233,6 +238,24 @@ func TestVerifyRequiresForwardAuthContext(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401 without forward_auth context, got %d", w.Code)
+	}
+}
+
+// Requests reaching /verify through the portal route carry the portal's
+// Host header — those must be refused even with a fully forged
+// X-Forwarded-* bundle (X-Forwarded-Method included).
+func TestVerifyRefusedOnPortalHost(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	code := app.codes.Put(codeEntry{Kind: "ticket", Username: "nick", Host: "app.example.com"}, time.Minute)
+
+	r := fwdReq("/verify", "app.example.com", "/?"+ticketParam+"="+code)
+	r.Host = "tap.example.com" // arrived via the portal route
+	r.Header.Set("Accept", "text/html")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("forged forward_auth context on portal host accepted: %d", w.Code)
 	}
 }
 
@@ -642,7 +665,7 @@ func TestInviteMintingGates(t *testing.T) {
 	}
 
 	// Admin with a fresh action token succeeds.
-	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin"}, time.Minute)
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
 	w3 := postAs(h, "/api/invite", "https://tap.example.com",
 		[]*http.Cookie{portalCookie(t, app, "admin")},
 		map[string]string{"username": "newbie", "action_token": action})
@@ -684,7 +707,7 @@ func TestKeyDeleteRequiresStepUp(t *testing.T) {
 	}
 
 	// With one: works.
-	action := app.codes.Put(codeEntry{Kind: "action", Username: "nick"}, time.Minute)
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "nick", Op: "delete-key"}, time.Minute)
 	w3 := postAs(h, "/api/keys/delete", "https://tap.example.com",
 		[]*http.Cookie{portalCookie(t, app, "nick")},
 		map[string]string{"id": list.Keys[0].ID, "action_token": action})
@@ -692,10 +715,11 @@ func TestKeyDeleteRequiresStepUp(t *testing.T) {
 		t.Fatalf("delete with step-up failed: %d: %s", w3.Code, w3.Body)
 	}
 
-	// Deleting the last one: refused even with step-up.
-	action2 := app.codes.Put(codeEntry{Kind: "action", Username: "nick"}, time.Minute)
+	// Deleting the last one: refused even with step-up. (The first delete
+	// bumped the epoch, so the session cookie must be minted at epoch 1.)
+	action2 := app.codes.Put(codeEntry{Kind: "action", Username: "nick", Op: "delete-key"}, time.Minute)
 	w4 := postAs(h, "/api/keys/delete", "https://tap.example.com",
-		[]*http.Cookie{portalCookie(t, app, "nick")},
+		[]*http.Cookie{cookieOf(t, app, tokenPortal, app.cfg.CookieName, "nick", "", 1)},
 		map[string]string{"id": list.Keys[1].ID, "action_token": action2})
 	if w4.Code != http.StatusBadRequest {
 		t.Fatalf("last key deleted: %d", w4.Code)
@@ -713,7 +737,7 @@ func TestKeyAddRequiresStepUp(t *testing.T) {
 		t.Fatalf("add-key ceremony started without step-up: %d", w.Code)
 	}
 
-	action := app.codes.Put(codeEntry{Kind: "action", Username: "nick"}, time.Minute)
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "nick", Op: "add-key"}, time.Minute)
 	w2 := postAs(h, "/api/keys/add/begin", "https://tap.example.com",
 		[]*http.Cookie{portalCookie(t, app, "nick")},
 		map[string]string{"action_token": action, "key_name": "new"})
@@ -725,12 +749,12 @@ func TestKeyAddRequiresStepUp(t *testing.T) {
 // Action tokens belong to one user: another user's session can't spend them.
 func TestActionTokenUserBinding(t *testing.T) {
 	app, _ := testApp(t)
-	action := app.codes.Put(codeEntry{Kind: "action", Username: "alice"}, time.Minute)
-	if app.consumeAction("bob", action) {
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "alice", Op: "delete-key"}, time.Minute)
+	if app.consumeAction("bob", action, "delete-key") {
 		t.Fatal("bob spent alice's action token")
 	}
 	// And the attempt burned it.
-	if app.consumeAction("alice", action) {
+	if app.consumeAction("alice", action, "delete-key") {
 		t.Fatal("burned token redeemed")
 	}
 }
@@ -763,5 +787,132 @@ func TestClientIPTakesLastXFF(t *testing.T) {
 	r.Header.Set("X-Forwarded-For", "6.6.6.6, 10.0.0.9, 192.168.1.50")
 	if ip := clientIP(r); ip != "192.168.1.50" {
 		t.Fatalf("clientIP = %q, want the proxy-appended last entry", ip)
+	}
+}
+
+// A tap authorized for one operation must not spend on another.
+func TestActionTokenOpBinding(t *testing.T) {
+	app, _ := testApp(t)
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "nick", Op: "delete-key"}, time.Minute)
+	if app.consumeAction("nick", action, "add-key") {
+		t.Fatal("delete-key tap spent on add-key")
+	}
+}
+
+func TestLogoutAllBumpsEpoch(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	svc := svcCookie(t, app, "nick", "app.example.com") // minted at epoch 0
+
+	w := postAs(h, "/api/logout-all", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "nick")}, map[string]string{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout-all: %d: %s", w.Code, w.Body)
+	}
+	if app.store.Get("nick").SessionEpoch != 1 {
+		t.Fatal("epoch not bumped")
+	}
+	// The old service cookie must now be dead everywhere.
+	r := fwdReq("/verify", "app.example.com", "/")
+	r.Header.Set("Accept", "application/json")
+	r.AddCookie(svc)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r)
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("service cookie survived logout-all: %d", w2.Code)
+	}
+}
+
+// Deleting a key is a revocation event: the epoch bumps (killing all
+// outstanding sessions) and the deleting browser gets a fresh cookie.
+func TestKeyDeleteBumpsEpochAndReissues(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	app.store.AddCredential("nick", []byte("handle-nick"), "spare", webauthn.Credential{ID: []byte("id2")}, false)
+	svc := svcCookie(t, app, "nick", "app.example.com")
+
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "nick", Op: "delete-key"}, time.Minute)
+	id := base64.RawURLEncoding.EncodeToString([]byte("id2"))
+	w := postAs(h, "/api/keys/delete", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "nick")},
+		map[string]string{"id": id, "action_token": action})
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete: %d: %s", w.Code, w.Body)
+	}
+	if app.store.Get("nick").SessionEpoch != 1 {
+		t.Fatal("delete did not bump the epoch")
+	}
+	var fresh *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == app.cfg.CookieName && c.Value != "" {
+			fresh = c
+		}
+	}
+	if fresh == nil {
+		t.Fatal("no fresh portal cookie after delete")
+	}
+	tok, err := verifyToken(app.cfg.SessionSecret, tokenPortal, fresh.Value, time.Now())
+	if err != nil || tok.Epoch != 1 {
+		t.Fatalf("fresh cookie not on the new epoch: %v %+v", err, tok)
+	}
+	// Old service cookie: dead.
+	r := fwdReq("/verify", "app.example.com", "/")
+	r.Header.Set("Accept", "application/json")
+	r.AddCookie(svc)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r)
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("service cookie survived key deletion: %d", w2.Code)
+	}
+}
+
+// Sliding renewal stops once the session lineage exceeds the absolute cap.
+func TestRenewalLineageCap(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+
+	mk := func(first time.Time) *http.Cookie {
+		raw, err := signToken(app.cfg.SessionSecret, Token{
+			Type: tokenPortal, Username: "nick",
+			IssuedAt: time.Now().Unix(),
+			First:    first.Unix(),
+			// Within the renewal window (remaining < TTL/2).
+			Expiry: time.Now().Add(time.Minute).Unix(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Cookie{Name: app.cfg.CookieName, Value: raw}
+	}
+	renewed := func(c *http.Cookie) bool {
+		r := httptest.NewRequest("GET", "/api/session", nil)
+		r.AddCookie(c)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		for _, sc := range w.Result().Cookies() {
+			if sc.Name == app.cfg.CookieName && sc.Value != "" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !renewed(mk(time.Now().Add(-24 * time.Hour))) {
+		t.Fatal("young session not renewed")
+	}
+	if renewed(mk(time.Now().Add(-maxPortalLineage - time.Hour))) {
+		t.Fatal("over-age lineage still renewing")
+	}
+}
+
+// An explicit default port must not dodge the portal-host exclusion.
+func TestTicketRedirectPortalPortInsensitive(t *testing.T) {
+	app, _ := testApp(t)
+	target := "https://tap.example.com:443/x"
+	if got := app.ticketRedirect("nick", target); got != target {
+		t.Fatalf("portal target with explicit port got ticketed: %q", got)
+	}
+	if got := app.ticketRedirect("nick", "https://app.example.com/x"); !strings.Contains(got, ticketParam+"=") {
+		t.Fatalf("app target not ticketed: %q", got)
 	}
 }

@@ -34,18 +34,18 @@ import (
 var webFS embed.FS
 
 type Config struct {
-	Listen        string        // bind address
-	PortalURL     *url.URL      // public URL of this portal (login page)
-	RPID          string        // WebAuthn RP ID; also the zone apps may live under
-	Origins       []string      // allowed WebAuthn origins (exact scheme://host[:port])
-	CookieName    string        // portal session cookie name (host-only on the portal)
-	SessionSecret []byte        // HMAC key for all tokens (>= 32 bytes)
-	SessionTTL    time.Duration // portal session lifetime (sliding)
-	SvcTTL        time.Duration // per-app service cookie lifetime (re-bounce is silent)
-	BootstrapToken string       // enrolls the FIRST user only; invites after that
-	AdminUsers    []string      // extra admins beside the bootstrap user
-	DataDir       string        // where users.json lives
-	DisplayName   string        // RP display name shown by authenticator UIs
+	Listen         string        // bind address
+	PortalURL      *url.URL      // public URL of this portal (login page)
+	RPID           string        // WebAuthn RP ID; also the zone apps may live under
+	Origins        []string      // allowed WebAuthn origins (exact scheme://host[:port])
+	CookieName     string        // portal session cookie name (host-only on the portal)
+	SessionSecret  []byte        // HMAC key for all tokens (>= 32 bytes)
+	SessionTTL     time.Duration // portal session lifetime (sliding)
+	SvcTTL         time.Duration // per-app service cookie lifetime (re-bounce is silent)
+	BootstrapToken string        // enrolls the FIRST user only; invites after that
+	AdminUsers     []string      // extra admins beside the bootstrap user
+	DataDir        string        // where users.json lives
+	DisplayName    string        // RP display name shown by authenticator UIs
 }
 
 func loadConfig() (*Config, error) {
@@ -76,8 +76,9 @@ func loadConfig() (*Config, error) {
 	cfg.PortalURL = portal
 
 	// RP ID defaults to the portal host; set it to a parent domain
-	// (e.g. example.com for tap.example.com) to share the session cookie
-	// across every service under it.
+	// (e.g. example.com for tap.example.com) so credentials survive a
+	// portal rename and sibling apps fall inside the redirect zone. It
+	// scopes no cookie — all cookies are host-only.
 	cfg.RPID = envDefault("STILE_RP_ID", portal.Hostname())
 	if cfg.RPID != portal.Hostname() && !strings.HasSuffix(portal.Hostname(), "."+cfg.RPID) {
 		return nil, fmt.Errorf("STILE_RP_ID %q is not a registrable suffix of the portal host %q", cfg.RPID, portal.Hostname())

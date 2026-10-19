@@ -15,6 +15,7 @@ type codeEntry struct {
 	Kind     string // "ticket", "invite", "action"
 	Username string
 	Host     string // ticket only: the app host the ticket is bound to
+	Op       string // action only: the one operation the step-up tap authorizes
 	Expires  time.Time
 }
 

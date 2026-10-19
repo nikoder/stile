@@ -185,7 +185,9 @@ func (s *Store) RenameCredential(username string, credID []byte, name string) er
 
 // DeleteCredential removes a credential — except the user's last one:
 // locking yourself out should take a deliberate users.json edit, not a
-// misclick.
+// misclick. Deleting a key is treated as a revocation event (keys get
+// deleted because they're lost or distrusted), so the epoch is bumped:
+// every outstanding session dies, including ones that key minted.
 func (s *Store) DeleteCredential(username string, credID []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -200,10 +202,25 @@ func (s *Store) DeleteCredential(username string, credID []byte) error {
 	for i := range rec.Credentials {
 		if bytes.Equal(rec.Credentials[i].Credential.ID, credID) {
 			rec.Credentials = append(rec.Credentials[:i], rec.Credentials[i+1:]...)
+			rec.SessionEpoch++
 			return s.saveLocked()
 		}
 	}
 	return fmt.Errorf("unknown credential for %q", username)
+}
+
+// BumpEpoch invalidates every outstanding cookie for the user ("sign out
+// everywhere" / the panic button) and returns the new epoch.
+func (s *Store) BumpEpoch(username string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeReloadLocked()
+	rec, ok := s.data[username]
+	if !ok {
+		return 0, fmt.Errorf("unknown user %q", username)
+	}
+	rec.SessionEpoch++
+	return rec.SessionEpoch, s.saveLocked()
 }
 
 // saveLocked writes atomically (temp + rename) and fsyncs both the file

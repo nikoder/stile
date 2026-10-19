@@ -31,7 +31,11 @@ type Token struct {
 	Username string `json:"u"`
 	Host     string `json:"h,omitempty"` // svc only: the one host this is valid for
 	IssuedAt int64  `json:"i"`
-	Expiry   int64  `json:"e"`
+	// First is the original login time, carried across sliding renewals so
+	// a stolen portal cookie can't renew itself forever: renewal is
+	// refused once the lineage exceeds maxPortalLineage.
+	First  int64 `json:"f,omitempty"`
+	Expiry int64 `json:"e"`
 	// Epoch must equal the user's current session_epoch in users.json.
 	// Bumping that number (API-less: edit the file) is the panic button —
 	// it invalidates every outstanding cookie for the user at once.

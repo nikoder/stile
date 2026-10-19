@@ -33,10 +33,18 @@ const (
 	ceremonyCookie = "stile_ceremony"
 	ticketParam    = "stile_ticket"
 
-	ticketTTL = 30 * time.Second  // portal → app bounce
-	actionTTL = 2 * time.Minute   // step-up tap → sensitive operation
-	inviteTTL = 15 * time.Minute  // admin invite → enrollment
+	ticketTTL = 30 * time.Second // portal → app bounce
+	actionTTL = 2 * time.Minute  // step-up tap → sensitive operation
+	inviteTTL = 15 * time.Minute // admin invite → enrollment
+
+	// maxPortalLineage caps how long a portal session can keep renewing
+	// itself since the original key tap. Past this, sign in again.
+	maxPortalLineage = 90 * 24 * time.Hour
 )
+
+// stepUpOps are the operations a step-up tap can authorize; the client
+// declares one up front and the minted action token spends only on it.
+var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true}
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9._-]{1,32}$`)
 
@@ -66,6 +74,7 @@ func (a *App) Routes(static fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/keys/add/begin", a.handleKeyAddBegin)
 	mux.HandleFunc("POST /api/invite", a.handleInvite)
 	mux.HandleFunc("POST /api/logout", a.handleLogout)
+	mux.HandleFunc("POST /api/logout-all", a.handleLogoutAll)
 
 	return securityHeaders(mux)
 }
@@ -105,10 +114,14 @@ func (a *App) servePage(static fs.FS, name string) http.HandlerFunc {
 func (a *App) handleVerify(w http.ResponseWriter, r *http.Request) {
 	fwdHost := r.Header.Get("X-Forwarded-Host")
 	// Only trust the X-Forwarded-* bundle on a real forward_auth
-	// subrequest, recognised by X-Forwarded-Method (Caddy sets it there
-	// and only there). /verify is publicly routable on the portal host,
-	// where these headers arrive client-controlled.
-	isFwd := r.Header.Get("X-Forwarded-Method") != "" && fwdHost != ""
+	// subrequest. Two independent tells, either sufficient: forward_auth
+	// subrequests carry the protected app's original Host header (the
+	// portal route's proxied requests carry the portal's own Host, so
+	// those are refused without trusting any X-Forwarded-* header), and
+	// X-Forwarded-Method is set by Caddy's forward_auth and additionally
+	// stripped from client requests on the portal route.
+	isFwd := r.Header.Get("X-Forwarded-Method") != "" && fwdHost != "" &&
+		!strings.EqualFold(requestHostname(r), a.cfg.PortalURL.Hostname())
 
 	if isFwd {
 		if a.redeemTicket(w, r, fwdHost) {
@@ -195,11 +208,17 @@ func (a *App) checkPortalSession(r *http.Request) (Token, *UserRecord, bool) {
 	return tok, rec, true
 }
 
-func (a *App) setPortalCookie(w http.ResponseWriter, username string, epoch int64) {
-	exp := time.Now().Add(a.cfg.SessionTTL)
+// setPortalCookie mints the portal session cookie. first is the original
+// login time carried across renewals; pass 0 for a fresh login.
+func (a *App) setPortalCookie(w http.ResponseWriter, username string, epoch, first int64) {
+	now := time.Now()
+	if first == 0 {
+		first = now.Unix()
+	}
+	exp := now.Add(a.cfg.SessionTTL)
 	a.setCookie(w, a.cfg.CookieName, Token{
 		Type: tokenPortal, Username: username,
-		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(), Epoch: epoch,
+		IssuedAt: now.Unix(), First: first, Expiry: exp.Unix(), Epoch: epoch,
 	}, exp)
 }
 
@@ -247,9 +266,16 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp["admin"] = a.isAdmin(rec)
 		// Sliding renewal belongs here: the browser talks to the portal
 		// origin directly, so Set-Cookie actually lands (on forward_auth
-		// 2xx responses Caddy discards it).
-		if time.Until(time.Unix(tok.Expiry, 0)) < a.cfg.SessionTTL/2 {
-			a.setPortalCookie(w, tok.Username, rec.SessionEpoch)
+		// 2xx responses Caddy discards it). Renewal stops once the session
+		// lineage is older than maxPortalLineage — a stolen cookie can't
+		// renew itself forever.
+		first := tok.First
+		if first == 0 {
+			first = tok.IssuedAt
+		}
+		if time.Until(time.Unix(tok.Expiry, 0)) < a.cfg.SessionTTL/2 &&
+			time.Since(time.Unix(first, 0)) < maxPortalLineage {
+			a.setPortalCookie(w, tok.Username, rec.SessionEpoch, first)
 		}
 	}
 	// The portal echoes ?rd= back through the server so redirect targets
@@ -267,12 +293,11 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bad origin", http.StatusForbidden)
 		return
 	}
-	tok, rec, ok := a.checkPortalSession(r)
+	tok, _, ok := a.checkPortalSession(r)
 	if !ok {
 		jsonError(w, "not signed in", http.StatusUnauthorized)
 		return
 	}
-	_ = rec
 	var req struct {
 		Rd string `json:"rd"`
 	}
@@ -291,7 +316,10 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 // on the portal host itself pass through untouched.
 func (a *App) ticketRedirect(username, target string) string {
 	u, err := url.Parse(target)
-	if err != nil || u.Host == a.cfg.PortalURL.Host {
+	// Hostname comparison on purpose: an explicit default port in the rd
+	// (tap.example.com:443) must not slip past the portal exclusion and
+	// mint an unredeemable port-suffixed ticket.
+	if err != nil || strings.EqualFold(u.Hostname(), a.cfg.PortalURL.Hostname()) {
 		return target
 	}
 	code := a.codes.Put(codeEntry{Kind: "ticket", Username: username, Host: u.Host}, ticketTTL)
@@ -380,7 +408,7 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	if rec == nil {
 		return
 	}
-	a.setPortalCookie(w, rec.Username, rec.SessionEpoch)
+	a.setPortalCookie(w, rec.Username, rec.SessionEpoch, 0)
 	redirect := a.safeRedirect(r.URL.Query().Get("rd"))
 	if redirect == "" {
 		redirect = a.cfg.PortalURL.String() + "/"
@@ -402,7 +430,29 @@ func (a *App) handleStepupBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "not signed in", http.StatusUnauthorized)
 		return
 	}
-	a.beginAssertion(w, r, rec, "stepup")
+	var req struct {
+		Op string `json:"op"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	// The intended operation is declared up front and rides the ceremony:
+	// the resulting action token spends on that operation only, so a tap
+	// meant for "delete key" can't be redirected into "mint invite".
+	if !stepUpOps[req.Op] {
+		jsonError(w, "unknown step-up operation", http.StatusBadRequest)
+		return
+	}
+	opts, sess, err := a.wa.BeginLogin(waUser{rec.ID, rec.Username, credentials(rec)},
+		webauthn.WithUserVerification(protocol.VerificationDiscouraged))
+	if err != nil {
+		log.Printf("begin stepup %s: %v", rec.Username, err)
+		jsonError(w, "login failed", http.StatusBadRequest)
+		return
+	}
+	id := a.pending.Put(pendingCeremony{Kind: "stepup", Username: rec.Username, Op: req.Op, Session: *sess})
+	a.setCeremonyCookie(w, id)
+	writeJSON(w, opts)
 }
 
 func (a *App) handleStepupFinish(w http.ResponseWriter, r *http.Request) {
@@ -411,22 +461,45 @@ func (a *App) handleStepupFinish(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "not signed in", http.StatusUnauthorized)
 		return
 	}
-	rec, _ := a.finishAssertion(w, r, "stepup")
-	if rec == nil {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
 		return
 	}
-	if rec.Username != tok.Username {
+	p, pok := a.takeCeremony(r, "stepup")
+	if !pok {
+		jsonError(w, "no ceremony in progress", http.StatusBadRequest)
+		return
+	}
+	if p.Username != tok.Username {
 		jsonError(w, "session mismatch", http.StatusForbidden)
 		return
 	}
-	action := a.codes.Put(codeEntry{Kind: "action", Username: rec.Username}, actionTTL)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	rec := a.store.Get(p.Username)
+	if rec == nil || len(rec.Credentials) == 0 {
+		jsonError(w, "login failed", http.StatusBadRequest)
+		return
+	}
+	cred, err := a.wa.FinishLogin(waUser{rec.ID, rec.Username, credentials(rec)}, p.Session, r)
+	if err != nil || cred.Authenticator.CloneWarning {
+		a.limiter.Allow("fail:"+clientIP(r), 10)
+		log.Printf("finish stepup %s refused: %v (clone=%v)", p.Username, err, cred != nil && cred.Authenticator.CloneWarning)
+		jsonError(w, "login failed", http.StatusBadRequest)
+		return
+	}
+	if err := a.store.TouchCredential(p.Username, cred); err != nil {
+		log.Printf("touch credential %s: %v", p.Username, err)
+	}
+	a.clearCeremonyCookie(w)
+	action := a.codes.Put(codeEntry{Kind: "action", Username: rec.Username, Op: p.Op}, actionTTL)
 	writeJSON(w, map[string]string{"action_token": action})
 }
 
-// consumeAction redeems a step-up action token for the given user.
-func (a *App) consumeAction(username, token string) bool {
+// consumeAction redeems a step-up action token for the given user and
+// operation.
+func (a *App) consumeAction(username, token, op string) bool {
 	e, ok := a.codes.Take("action", token)
-	return ok && e.Username == username
+	return ok && e.Username == username && e.Op == op
 }
 
 // ---- key management (self-service, step-up gated where it matters) --------
@@ -504,7 +577,7 @@ func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if !a.consumeAction(tok.Username, req.ActionToken) {
+	if !a.consumeAction(tok.Username, req.ActionToken, "delete-key") {
 		jsonError(w, "step-up required", http.StatusForbidden)
 		return
 	}
@@ -517,7 +590,13 @@ func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	log.Printf("key deleted: %s (ip %s)", tok.Username, clientIP(r))
+	// The delete bumped the epoch (revocation event), which also killed
+	// the session this request rode in on. The human is present and just
+	// step-upped, so hand them a fresh cookie under the new epoch.
+	if rec2 := a.store.Get(tok.Username); rec2 != nil {
+		a.setPortalCookie(w, tok.Username, rec2.SessionEpoch, 0)
+	}
+	log.Printf("key deleted: %s — epoch bumped, outstanding sessions revoked (ip %s)", tok.Username, clientIP(r))
 	writeJSON(w, map[string]string{"status": "deleted"})
 }
 
@@ -540,7 +619,7 @@ func (a *App) handleKeyAddBegin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if !a.consumeAction(tok.Username, req.ActionToken) {
+	if !a.consumeAction(tok.Username, req.ActionToken, "add-key") {
 		jsonError(w, "step-up required", http.StatusForbidden)
 		return
 	}
@@ -699,7 +778,7 @@ func (a *App) handleInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	// An invite adds a key to (or creates) the named account — that's as
 	// sensitive as adding a key directly, so it costs a fresh tap too.
-	if !a.consumeAction(tok.Username, req.ActionToken) {
+	if !a.consumeAction(tok.Username, req.ActionToken, "invite") {
 		jsonError(w, "step-up required", http.StatusForbidden)
 		return
 	}
@@ -725,6 +804,32 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, map[string]string{"status": "logged out"})
+}
+
+// handleLogoutAll bumps the user's epoch: every portal and service cookie
+// everywhere dies on its next check. Session-gated on purpose — the worst
+// a stolen session can do here is log its victim out, and this doubles as
+// the UI panic button (the alternative is editing users.json by hand).
+func (a *App) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	tok, _, ok := a.checkPortalSession(r)
+	if !ok {
+		jsonError(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	if _, err := a.store.BumpEpoch(tok.Username); err != nil {
+		jsonError(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: a.cfg.CookieName, Value: "", Path: "/", MaxAge: -1,
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	log.Printf("logout-all: %s — epoch bumped, all sessions revoked (ip %s)", tok.Username, clientIP(r))
+	writeJSON(w, map[string]string{"status": "logged out everywhere"})
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -856,6 +961,14 @@ func credentialName(rec *UserRecord, cred *webauthn.Credential) string {
 		}
 	}
 	return "?"
+}
+
+// requestHostname is the Host header without any port.
+func requestHostname(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.Host); err == nil {
+		return host
+	}
+	return r.Host
 }
 
 func fwdProto(r *http.Request) string {

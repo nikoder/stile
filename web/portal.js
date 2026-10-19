@@ -3,10 +3,11 @@
 const $ = id => document.getElementById(id);
 const rd = new URLSearchParams(location.search).get('rd') || '';
 
-// A fresh tap of an enrolled key, unlocking one sensitive operation.
-async function stepUp() {
+// A fresh tap of an enrolled key, unlocking exactly one operation of the
+// declared kind.
+async function stepUp(op) {
   showMsg($('msg'), 'Tap your key to confirm…');
-  const options = await postJSON('/api/stepup/begin', {});
+  const options = await postJSON('/api/stepup/begin', { op });
   const result = await assertKey(options);
   const done = await sendResult('/api/stepup/finish', result);
   return done.action_token;
@@ -38,11 +39,11 @@ async function loadKeys() {
     del.className = 'mini danger';
     del.textContent = 'delete';
     del.addEventListener('click', async () => {
-      if (!confirm('Delete key "' + k.name + '"?')) return;
+      if (!confirm('Delete key "' + k.name + '"?\n\nThis also signs you out everywhere else (the key might be lost or stolen — all existing sessions are revoked). This browser stays signed in.')) return;
       try {
-        const action = await stepUp();
+        const action = await stepUp('delete-key');
         await postJSON('/api/keys/delete', { id: k.id, action_token: action });
-        showMsg($('msg'), 'Key deleted.', 'ok');
+        showMsg($('msg'), 'Key deleted; all other sessions revoked.', 'ok');
         await loadKeys();
       } catch (err) { showMsg($('msg'), err.message, 'error'); }
     });
@@ -106,7 +107,7 @@ $('addKey').addEventListener('click', async () => {
   const name = prompt('Name for the new key:');
   if (!name) return;
   try {
-    const action = await stepUp();
+    const action = await stepUp('add-key');
     showMsg($('msg'), 'Now tap the NEW key…');
     const options = await postJSON('/api/keys/add/begin', { action_token: action, key_name: name });
     const result = await createKey(options);
@@ -123,7 +124,7 @@ $('inviteForm').addEventListener('submit', async ev => {
   const username = $('inviteUser').value.trim().toLowerCase();
   if (!username) return;
   try {
-    const action = await stepUp();
+    const action = await stepUp('invite');
     const inv = await postJSON('/api/invite', { username, action_token: action });
     $('inviteOut').textContent = inv.link + '  (single use, expires in ' + inv.expires_in_minutes + ' min)';
     showMsg($('msg'), 'Invite minted.', 'ok');
@@ -134,6 +135,12 @@ $('inviteForm').addEventListener('submit', async ev => {
 
 $('logout').addEventListener('click', async () => {
   try { await postJSON('/api/logout', {}); } catch { /* cookie clear is best-effort */ }
+  location.replace('/');
+});
+
+$('logoutAll').addEventListener('click', async () => {
+  if (!confirm('Sign out everywhere? Every session on every device and app dies immediately.')) return;
+  try { await postJSON('/api/logout-all', {}); } catch (err) { showMsg($('msg'), err.message, 'error'); return; }
   location.replace('/');
 });
 

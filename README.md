@@ -49,9 +49,15 @@ instead. stile is built for the operator who judged that trade honestly.
 
 Other sharp edges, stated plainly:
 
-- Cookies are stateless HMAC tokens: logout clears the portal cookie but
-  cannot invalidate a stolen copy. The epoch bump above is the real
-  revocation lever (rotating `STILE_SESSION_SECRET` logs everyone out).
+- Cookies are stateless HMAC tokens: plain "Sign out" clears only the
+  portal cookie — service cookies on app hosts live until they expire.
+  "Sign out everywhere" bumps your epoch and kills every cookie at once;
+  it's also the panic button, and deleting a key does the same bump
+  automatically (keys get deleted because they're lost or distrusted).
+  Rotating `STILE_SESSION_SECRET` logs everyone out.
+- Portal sessions renew while used, but a session lineage dies 90 days
+  after its original key tap regardless — a stolen portal cookie cannot
+  renew itself forever.
 - forward_auth only protects the proxy's path. A service with a
   LAN-reachable port is **not** behind stile until that port is closed,
   and `Remote-User` is forgeable by anything that can reach the backend
