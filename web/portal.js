@@ -116,10 +116,24 @@ async function init() {
     if (last) $('username').value = last;
     $('username').focus();
     if (state.bootstrap) $('enrollHint').classList.remove('hidden');
-    // One-time per-device trust decision: only asked when the device
-    // carries no freeze token, with no silent default.
-    if (!freeze.armed) $('trustChoice').classList.remove('hidden');
+    // The trust choice is device-AND-account scoped: it's only needed
+    // when this device holds no freeze token for the username being
+    // entered. Re-evaluated as the username changes.
+    $('username').addEventListener('input', evaluateTrustChoice);
+    evaluateTrustChoice();
   }
+}
+
+// deviceReturningFor reports whether this device already holds a freeze
+// token for the given username (so no trust choice is needed).
+function deviceReturningFor(username) {
+  return freeze.armed && freeze.username === username;
+}
+
+function evaluateTrustChoice() {
+  const username = $('username').value.trim().toLowerCase();
+  const show = !deviceReturningFor(username);
+  $('trustChoice').classList.toggle('hidden', !show);
 }
 
 $('login').addEventListener('submit', async ev => {
@@ -127,9 +141,10 @@ $('login').addEventListener('submit', async ev => {
   const button = $('go');
   const username = $('username').value.trim().toLowerCase();
   if (!username) return;
-  // On a token-less device the trust decision is mandatory and explicit.
+  // The trust decision is mandatory and explicit UNLESS this device is
+  // already a trusted device for this exact account (returning device).
   let trust = 'returning';
-  if (!freeze.armed) {
+  if (!deviceReturningFor(username)) {
     const picked = document.querySelector('input[name="trust"]:checked');
     if (!picked) {
       showMsg($('msg'), 'Choose whether this is your own device first.', 'error');
