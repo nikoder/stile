@@ -642,7 +642,7 @@ func TestInviteFlow(t *testing.T) {
 
 func TestInviteMintingGates(t *testing.T) {
 	app, h := testApp(t)
-	addFakeUser(t, app, "ada")  // not admin
+	addFakeUser(t, app, "ada")   // not admin
 	addFakeUser(t, app, "admin") // promoted below
 	app.cfg.AdminUsers = []string{"admin"}
 
