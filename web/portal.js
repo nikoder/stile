@@ -64,6 +64,21 @@ async function loadKeys() {
 }
 
 let freeze = { armed: false };
+let sessionState = { authenticated: false };
+
+// renderFreezeBox paints the freeze capabilities from current state —
+// called at load and again whenever fresher state arrives (e.g. after a
+// failed freeze reveals the token was disarmed behind this page's back).
+function renderFreezeBox() {
+  const show = freeze.armed || sessionState.authenticated;
+  $('freezeBox').classList.toggle('hidden', !show);
+  $('freezeWho').textContent = freeze.armed
+    ? '"' + freeze.username + '"'
+    : (sessionState.authenticated ? '"' + sessionState.username + '"' : '');
+  const self = sessionState.authenticated && freeze.armed && freeze.username !== sessionState.username;
+  $('freezeSelfBtn').classList.toggle('hidden', !self);
+  if (!$('login').classList.contains('hidden')) evaluateTrustChoice();
+}
 
 async function init() {
   const qs = rd ? '?rd=' + encodeURIComponent(rd) : '';
@@ -77,22 +92,15 @@ async function init() {
   ]);
   if (sRes.status === 'fulfilled') state = sRes.value;
   if (fRes.status === 'fulfilled') freeze = fRes.value;
+  sessionState = state;
 
   // Freeze buttons mirror the device's REAL capabilities, one per
   // distinct account it can freeze: the device token's user (shown even
   // to other logged-in users — the capability is the device's, and
   // hiding it would be theater: anyone here could log out and press it)
   // and the signed-in user when they differ.
-  if (freeze.armed || state.authenticated) {
-    $('freezeWho').textContent = freeze.armed
-      ? '"' + freeze.username + '"'
-      : (state.authenticated ? '"' + state.username + '"' : '');
-    $('freezeBox').classList.remove('hidden');
-    if (state.authenticated && freeze.armed && freeze.username !== state.username) {
-      $('freezeSelfWho').textContent = '"' + state.username + '"';
-      $('freezeSelfBtn').classList.remove('hidden');
-    }
-  }
+  $('freezeSelfWho').textContent = state.authenticated ? '"' + state.username + '"' : '';
+  renderFreezeBox();
 
   if (state.authenticated) {
     $('who').textContent = state.username;
@@ -157,6 +165,13 @@ $('login').addEventListener('submit', async ev => {
   const button = $('go');
   const username = $('username').value.trim().toLowerCase();
   if (!username) return;
+  // Press-time freshness: the page-load status may be stale (the token
+  // can be disarmed behind an open tab), and a wrong "returning" call
+  // here would silently skip minting. Re-check before deciding.
+  try {
+    freeze = await (await fetch('/api/freeze/status')).json();
+  } catch { /* keep last known state */ }
+  evaluateTrustChoice();
   // The trust decision is mandatory and explicit UNLESS this device is
   // already a trusted device for this exact account (returning device).
   let trust = 'returning';
@@ -209,6 +224,12 @@ async function doFreeze(scope) {
       fetch('/api/freeze/status').then(r => r.json()).catch(() => ({ armed: false })),
       fetch('/api/session').then(r => r.json()).catch(() => ({ authenticated: true })),
     ]);
+    // The verification fetches are also the freshest state this page
+    // has — adopt them, so a disarmed-behind-our-back token updates the
+    // buttons and the login form's trust logic instead of going stale.
+    freeze = st;
+    sessionState = sess;
+    renderFreezeBox();
     // Token path proof: a still-valid token means the freeze landed on
     // its account (tokens survive their own freeze). Session path proof:
     // our session just died (the freeze bumps the epoch).
