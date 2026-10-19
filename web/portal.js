@@ -220,15 +220,18 @@ async function doFreeze(scope) {
     // already entitled to: its own token validity and session state.
     // False "success" to a panicking owner whose token was disarmed
     // would be the worst possible failure mode here.
+    let stOK = true, sessOK = true;
     const [st, sess] = await Promise.all([
-      fetch('/api/freeze/status').then(r => r.json()).catch(() => ({ armed: false })),
-      fetch('/api/session').then(r => r.json()).catch(() => ({ authenticated: true })),
+      fetch('/api/freeze/status').then(r => r.json()).catch(() => { stOK = false; return { armed: false }; }),
+      fetch('/api/session').then(r => r.json()).catch(() => { sessOK = false; return { authenticated: true }; }),
     ]);
     // The verification fetches are also the freshest state this page
     // has — adopt them, so a disarmed-behind-our-back token updates the
     // buttons and the login form's trust logic instead of going stale.
-    freeze = st;
-    sessionState = sess;
+    // But adopt only FULFILLED fetches: the catch values above are
+    // conservative defaults for the landed-verdict, not real state.
+    if (stOK) freeze = st;
+    if (sessOK) sessionState = sess;
     renderFreezeBox();
     // Token path proof: a still-valid token means the freeze landed on
     // its account (tokens survive their own freeze). Session path proof:
