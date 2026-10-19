@@ -40,7 +40,11 @@
           <input id="inviteUser" placeholder="username" autocapitalize="none" spellcheck="false" required>
           <button type="submit" class="secondary">Mint invite</button>
         </form>
-        <p id="inviteOut" class="hint" style="word-break:break-all"></p>
+        <div id="inviteOut" class="row hidden">
+          <input id="inviteLink" readonly>
+          <button id="inviteCopy" type="button" class="secondary">Copy</button>
+        </div>
+        <p id="inviteNote" class="hint"></p>
       </div>
     </div>
 

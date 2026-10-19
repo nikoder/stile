@@ -126,11 +126,27 @@ $('inviteForm').addEventListener('submit', async ev => {
   try {
     const action = await stepUp('invite');
     const inv = await postJSON('/api/invite', { username, action_token: action });
-    $('inviteOut').textContent = inv.link + '  (single use, expires in ' + inv.expires_in_minutes + ' min)';
+    $('inviteLink').value = inv.link;
+    $('inviteOut').classList.remove('hidden');
+    $('inviteNote').textContent = 'Single use, expires in ' + inv.expires_in_minutes + ' minutes.';
     showMsg($('msg'), 'Invite minted.', 'ok');
   } catch (err) {
     showMsg($('msg'), err.message || String(err), 'error');
   }
+});
+
+$('inviteCopy').addEventListener('click', async () => {
+  const link = $('inviteLink').value;
+  if (!link) return;
+  try {
+    await navigator.clipboard.writeText(link);
+    $('inviteCopy').textContent = 'Copied!';
+  } catch {
+    // Clipboard API can be denied; fall back to select-for-manual-copy.
+    $('inviteLink').select();
+    $('inviteCopy').textContent = 'Press Ctrl+C';
+  }
+  setTimeout(() => { $('inviteCopy').textContent = 'Copy'; }, 2000);
 });
 
 $('logout').addEventListener('click', async () => {
