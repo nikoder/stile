@@ -76,6 +76,24 @@ Other sharp edges, stated plainly:
 stile is a single static binary / scratch container listening on `:9092`.
 It must only be reachable through your TLS-terminating reverse proxy.
 
+### docker compose
+
+```yaml
+services:
+  stile:
+    build: https://github.com/nikoder/stile.git   # or a local checkout
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      STILE_PORTAL_URL: https://auth.example.com
+      STILE_RP_ID: example.com          # the zone your apps live under
+      STILE_SESSION_SECRET: ${STILE_SESSION_SECRET:?generate: openssl rand -hex 32}
+      STILE_BOOTSTRAP_TOKEN: ${STILE_BOOTSTRAP_TOKEN:-}   # first user only
+    volumes:
+      - ./data:/data                    # users.json lives here
+    networks: [proxy]                   # reachable by your reverse proxy ONLY
+```
+
 ### Caddy
 
 ```caddyfile
