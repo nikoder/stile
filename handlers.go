@@ -557,7 +557,7 @@ func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bad origin", http.StatusForbidden)
 		return
 	}
-	tok, _, ok := a.checkPortalSession(r)
+	tok, rec, ok := a.checkPortalSession(r)
 	if !ok {
 		jsonError(w, "not signed in", http.StatusUnauthorized)
 		return
@@ -565,8 +565,18 @@ func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID          string `json:"id"`
 		ActionToken string `json:"action_token"`
+		// Deleting the ONLY key locks the account completely (re-entry
+		// needs an admin invite) — the client must say it means it. This
+		// is checked before the action token is consumed, so a refusal
+		// doesn't burn the step-up tap.
+		ConfirmLockout bool `json:"confirm_lockout"`
 	}
 	if !readJSON(w, r, &req) {
+		return
+	}
+	lastKey := len(rec.Credentials) <= 1
+	if lastKey && !req.ConfirmLockout {
+		jsonError(w, "this is the only key: deleting it locks the account until an admin re-invites it (confirm_lockout required)", http.StatusBadRequest)
 		return
 	}
 	if !a.consumeAction(tok.Username, req.ActionToken, "delete-key") {
@@ -584,7 +594,17 @@ func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	// The delete bumped the epoch (revocation event), which also killed
 	// the session this request rode in on. The human is present and just
-	// step-upped, so hand them a fresh cookie under the new epoch.
+	// step-upped, so hand them a fresh cookie under the new epoch — unless
+	// they deleted their last key, in which case the lockout is the point.
+	if lastKey {
+		http.SetCookie(w, &http.Cookie{
+			Name: a.cfg.CookieName, Value: "", Path: "/", MaxAge: -1,
+			Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		})
+		log.Printf("LAST key deleted: %s — account locked until re-invited (ip %s)", tok.Username, clientIP(r))
+		writeJSON(w, map[string]string{"status": "deleted; account locked until re-invited"})
+		return
+	}
 	if rec2 := a.store.Get(tok.Username); rec2 != nil {
 		a.setPortalCookie(w, tok.Username, rec2.SessionEpoch, 0)
 	}

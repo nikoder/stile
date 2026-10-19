@@ -124,7 +124,13 @@ route @app {
 - **Self-service**: the portal lists your keys; rename freely. Adding or
   deleting a key requires a **fresh tap of an existing key** (step-up),
   never just the session cookie — a stolen session cannot convert itself
-  into a permanent credential. The last key cannot be deleted.
+  into a permanent credential. Any deletion revokes all sessions.
+- **Deleting your only key** is allowed behind an extra explicit
+  confirmation, because a stolen key must be deletable even when it's the
+  last one: the account goes credential-less, every session dies, and the
+  way back in is a fresh admin invite. (If you no longer *hold* any key,
+  you can't pass the step-up — an admin deletes the user or bumps their
+  `session_epoch` in `users.json` instead, then re-invites.)
 
 Credentials are non-discoverable: they consume **no** storage slots on the
 key, and the key never needs a PIN set at any point.

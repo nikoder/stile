@@ -205,12 +205,9 @@ func TestStoreExternalEditReload(t *testing.T) {
 	}
 }
 
-func TestStoreDeleteLastCredentialRefused(t *testing.T) {
+func TestStoreDeleteAndRename(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "users.json"))
 	s.AddCredential("nick", []byte("h"), "a", webauthn.Credential{ID: []byte("id1")}, false)
-	if err := s.DeleteCredential("nick", []byte("id1")); err == nil {
-		t.Fatal("deleted the last credential")
-	}
 	s.AddCredential("nick", []byte("h"), "b", webauthn.Credential{ID: []byte("id2")}, false)
 	if err := s.DeleteCredential("nick", []byte("id1")); err != nil {
 		t.Fatalf("delete with a spare failed: %v", err)
@@ -715,14 +712,43 @@ func TestKeyDeleteRequiresStepUp(t *testing.T) {
 		t.Fatalf("delete with step-up failed: %d: %s", w3.Code, w3.Body)
 	}
 
-	// Deleting the last one: refused even with step-up. (The first delete
-	// bumped the epoch, so the session cookie must be minted at epoch 1.)
+	// Deleting the last one without the explicit lockout confirmation:
+	// refused even with step-up, and BEFORE the action token is spent.
+	// (The first delete bumped the epoch, so cookies are minted at 1.)
 	action2 := app.codes.Put(codeEntry{Kind: "action", Username: "nick", Op: "delete-key"}, time.Minute)
+	epoch1 := cookieOf(t, app, tokenPortal, app.cfg.CookieName, "nick", "", 1)
 	w4 := postAs(h, "/api/keys/delete", "https://tap.example.com",
-		[]*http.Cookie{cookieOf(t, app, tokenPortal, app.cfg.CookieName, "nick", "", 1)},
-		map[string]string{"id": list.Keys[1].ID, "action_token": action2})
+		[]*http.Cookie{epoch1},
+		map[string]any{"id": list.Keys[1].ID, "action_token": action2})
 	if w4.Code != http.StatusBadRequest {
-		t.Fatalf("last key deleted: %d", w4.Code)
+		t.Fatalf("last key deleted without confirm_lockout: %d", w4.Code)
+	}
+
+	// With confirmation: allowed, account goes credential-less and locked.
+	w5 := postAs(h, "/api/keys/delete", "https://tap.example.com",
+		[]*http.Cookie{epoch1},
+		map[string]any{"id": list.Keys[1].ID, "action_token": action2, "confirm_lockout": true})
+	if w5.Code != http.StatusOK {
+		t.Fatalf("confirmed last-key delete refused: %d: %s", w5.Code, w5.Body)
+	}
+	rec := app.store.Get("nick")
+	if len(rec.Credentials) != 0 || rec.SessionEpoch != 2 {
+		t.Fatalf("unexpected post-lockout state: %+v", rec)
+	}
+	// Nothing signs in anymore — portal cookies at any epoch are dead.
+	r2 := httptest.NewRequest("GET", "/api/keys", nil)
+	r2.AddCookie(cookieOf(t, app, tokenPortal, app.cfg.CookieName, "nick", "", 2))
+	w6 := httptest.NewRecorder()
+	h.ServeHTTP(w6, r2)
+	if w6.Code != http.StatusUnauthorized {
+		t.Fatalf("credential-less account still has a working session: %d", w6.Code)
+	}
+	// ...but an invite can re-enroll the existing (empty) account.
+	code := app.codes.Put(codeEntry{Kind: "invite", Username: "nick"}, time.Minute)
+	w7 := postAs(h, "/api/enroll/begin", "https://tap.example.com", nil,
+		map[string]string{"token": code, "username": "nick", "key_name": "fresh"})
+	if w7.Code != http.StatusOK {
+		t.Fatalf("re-enrollment of locked account refused: %d: %s", w7.Code, w7.Body)
 	}
 }
 

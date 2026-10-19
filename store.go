@@ -183,11 +183,13 @@ func (s *Store) RenameCredential(username string, credID []byte, name string) er
 	return fmt.Errorf("unknown credential for %q", username)
 }
 
-// DeleteCredential removes a credential — except the user's last one:
-// locking yourself out should take a deliberate users.json edit, not a
-// misclick. Deleting a key is treated as a revocation event (keys get
-// deleted because they're lost or distrusted), so the epoch is bumped:
-// every outstanding session dies, including ones that key minted.
+// DeleteCredential removes a credential. Deleting a key is treated as a
+// revocation event (keys get deleted because they're lost or distrusted),
+// so the epoch is bumped: every outstanding session dies, including ones
+// that key minted. Deleting the LAST credential is allowed — a stolen key
+// must be deletable even when it's the only one — and leaves the account
+// credential-less: nothing can sign in until an admin invite re-enrolls
+// it. The handler demands an explicit confirmation for that case.
 func (s *Store) DeleteCredential(username string, credID []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,9 +197,6 @@ func (s *Store) DeleteCredential(username string, credID []byte) error {
 	rec, ok := s.data[username]
 	if !ok {
 		return fmt.Errorf("unknown user %q", username)
-	}
-	if len(rec.Credentials) <= 1 {
-		return fmt.Errorf("refusing to delete the last credential for %q", username)
 	}
 	for i := range rec.Credentials {
 		if bytes.Equal(rec.Credentials[i].Credential.ID, credID) {

@@ -17,6 +17,7 @@ async function loadKeys() {
   const { keys } = await (await fetch('/api/keys')).json();
   const ul = $('keys');
   ul.textContent = '';
+  const lastKey = keys.length === 1;
   for (const k of keys) {
     const li = document.createElement('li');
     const name = document.createElement('span');
@@ -39,10 +40,20 @@ async function loadKeys() {
     del.className = 'mini danger';
     del.textContent = 'delete';
     del.addEventListener('click', async () => {
-      if (!confirm('Delete key "' + k.name + '"?\n\nThis also signs you out everywhere else (the key might be lost or stolen — all existing sessions are revoked). This browser stays signed in.')) return;
+      // All warnings come BEFORE any key tap — nobody should authenticate
+      // their way into a refusal or a surprise.
+      const warning = lastKey
+        ? '⚠️ "' + k.name + '" is your ONLY key.\n\nDeleting it LOCKS THIS ACCOUNT COMPLETELY: every session ends now, sign-in becomes impossible, and the only way back in is a fresh invite from an admin.\n\nDo this if the key is lost or stolen. Delete it?'
+        : 'Delete key "' + k.name + '"?\n\nThis also signs you out everywhere else (the key might be lost or stolen — all existing sessions are revoked). This browser stays signed in.';
+      if (!confirm(warning)) return;
       try {
         const action = await stepUp('delete-key');
-        await postJSON('/api/keys/delete', { id: k.id, action_token: action });
+        await postJSON('/api/keys/delete', { id: k.id, action_token: action, confirm_lockout: lastKey });
+        if (lastKey) {
+          alert('Key deleted. The account is locked until an admin re-invites it.');
+          location.replace('/');
+          return;
+        }
         showMsg($('msg'), 'Key deleted; all other sessions revoked.', 'ok');
         await loadKeys();
       } catch (err) { showMsg($('msg'), err.message, 'error'); }
