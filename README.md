@@ -126,17 +126,20 @@ route @app {
   never just the session cookie — a stolen session cannot convert itself
   into a permanent credential. Any deletion revokes all sessions.
 - **Deleting your only key** is allowed behind an extra explicit
-  confirmation, because a stolen key must be deletable even when it's the
-  last one: the account goes credential-less, every session dies, and the
-  way back in is a fresh admin invite. (If you no longer *hold* any key,
-  you can't pass the step-up — an admin deletes the user or bumps their
-  `session_epoch` in `users.json` instead, then re-invites.)
-- **Stolen-key remediation is three steps, not one**: an attacker holding
-  the key (and your username) may already have signed in and **added a key
-  of their own**. Deleting the stolen key and revoking sessions does not
-  evict that credential — always review the key list and delete anything
-  you don't recognize. (Emptying the account via last-key delete sidesteps
-  this; a selective delete does not.)
+  confirmation. Its honest use is decommissioning a key you still *hold*
+  (retiring it, emptying a test account): the account goes
+  credential-less, every session dies, and the way back in is a fresh
+  admin invite.
+- **If a key is stolen, you are in a race** — and if it was your only
+  key, self-service can't win it: the step-up needs a key you no longer
+  have. An attacker holding the key (and your username) can sign in,
+  add a credential of their own, and delete yours. Remediation while you
+  still hold a second key: revoke sessions, delete the stolen key, and
+  **audit the key list for anything you don't recognize**. Remediation
+  once you've lost control of the account: the admin (ultimately,
+  whoever can edit `users.json` on the host — the terminal root of
+  trust) deletes the user or bumps their `session_epoch`, then
+  re-invites. There is no in-protocol substitute for that backstop.
 - Re-inviting a username restores its existing record — **including an
   Admin flag it previously carried**. If you hand out invites for
   usernames you didn't create, check `users.json` first.
