@@ -79,3 +79,18 @@ button.secondary { background: transparent; color: var(--muted); border: 1px sol
 .msg.ok { color: var(--ok); }
 .hidden { display: none; }
 a { color: var(--accent); }
+h2 { margin: 0.5rem 0 0; font-size: 1rem; }
+.row { display: flex; gap: 0.5rem; }
+.row input { flex: 1; }
+ul.keys { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+ul.keys li { display: flex; align-items: center; gap: 0.5rem; }
+ul.keys li span { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+button.mini {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  font-weight: 400;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+button.mini.danger { color: var(--error); }

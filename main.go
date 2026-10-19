@@ -36,23 +36,32 @@ var webFS embed.FS
 type Config struct {
 	Listen        string        // bind address
 	PortalURL     *url.URL      // public URL of this portal (login page)
-	RPID          string        // WebAuthn RP ID; also the session cookie domain
+	RPID          string        // WebAuthn RP ID; also the zone apps may live under
 	Origins       []string      // allowed WebAuthn origins (exact scheme://host[:port])
-	CookieName    string        // session cookie name
-	SessionSecret []byte        // HMAC key for session cookies (>= 32 bytes)
-	SessionTTL    time.Duration // session lifetime
-	EnrollToken   string        // shared secret gating enrollment; empty disables it
+	CookieName    string        // portal session cookie name (host-only on the portal)
+	SessionSecret []byte        // HMAC key for all tokens (>= 32 bytes)
+	SessionTTL    time.Duration // portal session lifetime (sliding)
+	SvcTTL        time.Duration // per-app service cookie lifetime (re-bounce is silent)
+	BootstrapToken string       // enrolls the FIRST user only; invites after that
+	AdminUsers    []string      // extra admins beside the bootstrap user
 	DataDir       string        // where users.json lives
 	DisplayName   string        // RP display name shown by authenticator UIs
 }
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{
-		Listen:      envDefault("STILE_LISTEN", ":9092"),
-		CookieName:  envDefault("STILE_COOKIE_NAME", "stile_session"),
-		DataDir:     envDefault("STILE_DATA", "/data"),
-		DisplayName: envDefault("STILE_DISPLAY_NAME", "stile"),
-		EnrollToken: os.Getenv("STILE_ENROLL_TOKEN"),
+		Listen:         envDefault("STILE_LISTEN", ":9092"),
+		CookieName:     envDefault("STILE_COOKIE_NAME", "stile_session"),
+		DataDir:        envDefault("STILE_DATA", "/data"),
+		DisplayName:    envDefault("STILE_DISPLAY_NAME", "stile"),
+		BootstrapToken: os.Getenv("STILE_BOOTSTRAP_TOKEN"),
+	}
+	if admins := os.Getenv("STILE_ADMIN_USERS"); admins != "" {
+		for _, u := range strings.Split(admins, ",") {
+			if u = strings.ToLower(strings.TrimSpace(u)); u != "" {
+				cfg.AdminUsers = append(cfg.AdminUsers, u)
+			}
+		}
 	}
 
 	rawPortal := os.Getenv("STILE_PORTAL_URL")
@@ -95,6 +104,12 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("STILE_SESSION_TTL %q is not a positive Go duration", ttl)
 	}
 
+	svcTTL := envDefault("STILE_SVC_TTL", "8h")
+	cfg.SvcTTL, err = time.ParseDuration(svcTTL)
+	if err != nil || cfg.SvcTTL <= 0 {
+		return nil, fmt.Errorf("STILE_SVC_TTL %q is not a positive Go duration", svcTTL)
+	}
+
 	return cfg, nil
 }
 
@@ -119,6 +134,7 @@ func newApp(cfg *Config, store *Store) (*App, error) {
 		store:   store,
 		wa:      wa,
 		pending: newPendingStore(5 * time.Minute),
+		codes:   newCodeStore(),
 		limiter: newLimiter(5 * time.Minute),
 	}, nil
 }
@@ -152,10 +168,10 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	if cfg.EnrollToken == "" {
-		log.Printf("enrollment DISABLED (STILE_ENROLL_TOKEN unset)")
+	if store.UserCount() == 0 && cfg.BootstrapToken == "" {
+		log.Printf("WARNING: no users and no STILE_BOOTSTRAP_TOKEN — nobody can enroll")
 	}
-	log.Printf("stile listening on %s (rp_id=%s portal=%s users=%d)",
-		cfg.Listen, cfg.RPID, cfg.PortalURL, store.UserCount())
+	log.Printf("stile listening on %s (rp_id=%s portal=%s users=%d svc_ttl=%s)",
+		cfg.Listen, cfg.RPID, cfg.PortalURL, store.UserCount(), cfg.SvcTTL)
 	log.Fatal(srv.ListenAndServe())
 }

@@ -22,11 +22,28 @@
     <div id="authed" class="hidden">
       <p>Signed in as <strong id="who"></strong>.</p>
       <p id="continue" class="hidden"><a id="continueLink" href="/">Continue to your destination →</a></p>
-      <button id="logout" class="secondary" type="button">Sign out</button>
+
+      <h2>Your keys</h2>
+      <ul id="keys" class="keys"></ul>
+      <div class="row">
+        <button id="addKey" class="secondary" type="button">Add a key</button>
+        <button id="logout" class="secondary" type="button">Sign out</button>
+      </div>
+      <p class="hint">Adding or removing a key asks for a fresh tap of an
+        existing key first.</p>
+
+      <div id="adminBox" class="hidden">
+        <h2>Invite (admin)</h2>
+        <form id="inviteForm" class="row">
+          <input id="inviteUser" placeholder="username" autocapitalize="none" spellcheck="false" required>
+          <button type="submit" class="secondary">Mint invite</button>
+        </form>
+        <p id="inviteOut" class="hint" style="word-break:break-all"></p>
+      </div>
     </div>
 
     <p id="msg" class="msg"></p>
-    <p id="enrollHint" class="hint hidden"><a href="/enroll">Enroll a new key →</a></p>
+    <p id="enrollHint" class="hint hidden"><a href="/enroll">First-time setup: enroll the first key →</a></p>
   </main>
 
   <script src="/static/webauthn.js"></script>

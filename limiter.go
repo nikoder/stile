@@ -18,6 +18,23 @@ func newLimiter(window time.Duration) *limiter {
 	return &limiter{window: window, events: map[string][]time.Time{}}
 }
 
+// sweepLocked drops keys whose events have all aged out, so the map can't
+// grow without bound under per-IP keys.
+func (l *limiter) sweepLocked(cutoff time.Time) {
+	for k, evs := range l.events {
+		live := false
+		for _, t := range evs {
+			if t.After(cutoff) {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(l.events, k)
+		}
+	}
+}
+
 // Allow records an event for key and reports whether it stays within max
 // events per window.
 func (l *limiter) Allow(key string, max int) bool {
@@ -25,6 +42,7 @@ func (l *limiter) Allow(key string, max int) bool {
 	defer l.mu.Unlock()
 	now := time.Now()
 	cutoff := now.Add(-l.window)
+	l.sweepLocked(cutoff)
 	kept := l.events[key][:0]
 	for _, t := range l.events[key] {
 		if t.After(cutoff) {

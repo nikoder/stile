@@ -2,14 +2,19 @@
 
 const $ = id => document.getElementById(id);
 
-const presetToken = new URLSearchParams(location.search).get('token');
-if (presetToken) $('token').value = presetToken;
+// Invite links carry a single-use, expiring, username-bound code — safe to
+// prefill from the URL (unlike a standing shared secret, which never
+// belongs in one).
+const params = new URLSearchParams(location.search);
+if (params.get('invite')) $('token').value = params.get('invite');
+if (params.get('username')) $('username').value = params.get('username');
 
-// Surface the server-side state up front; /api/enroll/begin enforces it.
+// First run (no users yet): the field takes the bootstrap token instead.
 fetch('/api/session').then(r => r.json()).then(state => {
-  if (!state.enrollment) {
-    $('go').disabled = true;
-    showMsg($('msg'), 'Enrollment is disabled on this server (no enrollment token set).', 'error');
+  if (state.bootstrap) {
+    $('tokenLabel').textContent = 'Bootstrap token';
+    $('blurb').textContent = 'First-time setup: enter the bootstrap token from '
+      + 'the server config. This first account becomes the admin.';
   }
 }).catch(() => { /* the begin call will report any real problem */ });
 

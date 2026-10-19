@@ -17,6 +17,7 @@ type pendingCeremony struct {
 	Username string
 	UserID   []byte // registration only: handle the ceremony ran with
 	CredName string // registration only
+	Admin    bool   // registration only: bootstrap user becomes admin
 	Session  webauthn.SessionData
 	Expires  time.Time
 }

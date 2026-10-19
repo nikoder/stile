@@ -9,11 +9,11 @@
 <body>
   <main class="card">
     <h1><span class="key">🔑</span> Enroll a key</h1>
-    <p class="hint">Registers a non-discoverable, presence-only credential on a
-      hardware key. Needs the enrollment token from the server config.</p>
+    <p class="hint" id="blurb">Registers a non-discoverable, presence-only
+      credential on a hardware key. Needs a single-use invite from an admin.</p>
 
     <form id="enroll">
-      <label for="token">Enrollment token</label>
+      <label for="token" id="tokenLabel">Invite code</label>
       <input id="token" autocomplete="off" required>
       <div style="height:0.4rem"></div>
       <label for="username">Username</label>

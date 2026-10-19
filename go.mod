@@ -1,6 +1,6 @@
 module github.com/nikoder/stile
 
-go 1.25
+go 1.26
 
 require github.com/go-webauthn/webauthn v0.13.4
 
