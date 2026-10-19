@@ -173,7 +173,14 @@ Who can pull the lever:
   tokens die, and their real devices re-arm at the next login tap. One's
   **own** account can only be disarmed by editing `freeze_epoch` in
   `users.json`: if it were reachable in-protocol, an attacker holding the
-  admin's key could pre-emptively disarm the admin's own devices.
+  admin's key could pre-emptively disarm the admin's own devices. The
+  full remediation sequence is "disarm, then have the user sign in
+  again" — re-arming only happens at login, so a disarmed device stays
+  disarmed until then. Multi-admin caveat: the self-refusal protects only
+  the admin's *own* account, so a stolen **admin** key could pre-emptively
+  disarm *other* users' devices — with more than one human on an
+  instance, treat a compromised admin key as a compromise of everyone's
+  freeze protection and respond at the host level.
 - Choosing **public or shared device** instead keeps nothing: no freeze
   token, no remembered username, a short (1 h) non-renewing session, and
   service cookies capped to it.
