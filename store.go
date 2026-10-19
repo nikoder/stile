@@ -231,8 +231,9 @@ func (s *Store) Freeze(username string) error {
 	return s.saveLocked()
 }
 
-// ClearDispute unfreezes the account. Sessions stay dead (the freeze
-// already bumped the epoch); the user signs in fresh.
+// ClearDispute unfreezes the account and bumps the epoch AGAIN: the user
+// signs in fresh anyway, and the bump guarantees that nothing minted
+// before — or during — the dispute survives into the cleared state.
 func (s *Store) ClearDispute(username string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -242,6 +243,7 @@ func (s *Store) ClearDispute(username string) error {
 		return fmt.Errorf("unknown user %q", username)
 	}
 	rec.Disputed = false
+	rec.SessionEpoch++
 	return s.saveLocked()
 }
 

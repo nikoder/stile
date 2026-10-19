@@ -1070,10 +1070,23 @@ func TestFreezeArmGates(t *testing.T) {
 		t.Fatalf("public session armed a device: %d", w.Code)
 	}
 
+	// A bare session never mints: arming rides the login tap. The arm
+	// endpoint only SLIDES an existing, matching token.
+	if w := postAs(h, "/api/freeze/arm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "nick")}, map[string]string{}); w.Code != http.StatusForbidden {
+		t.Fatalf("bare session armed a device: %d", w.Code)
+	}
+	// Another user's token can't be clobbered via the session either.
+	addFakeUser(t, app, "other")
+	if w := postAs(h, "/api/freeze/arm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "nick"), freezeCookie(t, app, "other")}, map[string]string{}); w.Code != http.StatusForbidden {
+		t.Fatalf("cross-user token slide allowed: %d", w.Code)
+	}
+
 	w := postAs(h, "/api/freeze/arm", "https://tap.example.com",
-		[]*http.Cookie{portalCookie(t, app, "nick")}, map[string]string{})
+		[]*http.Cookie{portalCookie(t, app, "nick"), freezeCookie(t, app, "nick")}, map[string]string{})
 	if w.Code != http.StatusOK {
-		t.Fatalf("arm: %d: %s", w.Code, w.Body)
+		t.Fatalf("slide of own token refused: %d: %s", w.Code, w.Body)
 	}
 	var fc *http.Cookie
 	for _, c := range w.Result().Cookies() {
@@ -1189,5 +1202,65 @@ func TestPublicSessionNoRenewAndCappedTickets(t *testing.T) {
 	}
 	if time.Unix(tok.Expiry, 0).After(time.Now().Add(2 * time.Minute)) {
 		t.Fatalf("service cookie outlives the public session: expires %v", time.Unix(tok.Expiry, 0))
+	}
+}
+
+// A cookie minted DURING the dispute (the thief finishing a pre-freeze
+// ceremony) must die when the dispute is cleared: clear bumps the epoch.
+func TestClearDisputeKillsMidDisputeCookies(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "victim")
+	app.store.Freeze("victim") // epoch 1
+
+	midDispute := cookieOf(t, app, tokenSvc, svcCookieName, "victim", "app.example.com", 1)
+	if err := app.store.ClearDispute("victim"); err != nil { // epoch 2
+		t.Fatal(err)
+	}
+	r := fwdReq("/verify", "app.example.com", "/")
+	r.Header.Set("Accept", "application/json")
+	r.AddCookie(midDispute)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("mid-dispute cookie survived the clear: %d", w.Code)
+	}
+}
+
+// The finish-time gate: a disputed account is not assertable, so any
+// in-flight login/step-up ceremony aborts at finish.
+func TestAssertableUserRefusesDisputed(t *testing.T) {
+	app, _ := testApp(t)
+	addFakeUser(t, app, "nick")
+	if app.assertableUser("nick") == nil {
+		t.Fatal("healthy user not assertable")
+	}
+	app.store.Freeze("nick")
+	if app.assertableUser("nick") != nil {
+		t.Fatal("disputed user still assertable")
+	}
+	if app.assertableUser("ghost") != nil {
+		t.Fatal("unknown user assertable")
+	}
+}
+
+// Enrollment finishing after a freeze must abort before storing anything.
+func TestEnrollFinishRefusesDisputed(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "victim")
+	id := app.pending.Put(pendingCeremony{Kind: "register", Username: "victim", UserID: []byte("handle-victim"), CredName: "thief"})
+	app.store.Freeze("victim")
+
+	raw, _ := json.Marshal(map[string]string{})
+	r := httptest.NewRequest("POST", "/api/enroll/finish", bytes.NewReader(raw))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Origin", "https://tap.example.com")
+	r.AddCookie(&http.Cookie{Name: ceremonyCookie, Value: id})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", w.Code)
+	}
+	if n := len(app.store.Get("victim").Credentials); n != 1 {
+		t.Fatalf("credential count changed on disputed account: %d", n)
 	}
 }

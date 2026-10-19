@@ -88,9 +88,15 @@ async function init() {
     if (state.admin) $('adminBox').classList.remove('hidden');
     if (freeze.armed) {
       $('armedRow').classList.remove('hidden');
-      // Slide the token's lifetime on any authenticated visit from a
-      // trusted (non-public) session.
-      if (!state.public) postJSON('/api/freeze/arm', {}).catch(() => {});
+      if (freeze.username === state.username) {
+        // Slide the token's lifetime on authenticated visits — own token,
+        // non-public session only (the server enforces both).
+        if (!state.public) postJSON('/api/freeze/arm', {}).catch(() => {});
+      } else {
+        // Someone else's token: never silently clobber it. Arming for
+        // this user is an explicit login-time choice after a Forget.
+        $('armedWho').textContent = ' for "' + freeze.username + '"';
+      }
     } else if (!state.public) {
       $('armRow').classList.remove('hidden');
     }
@@ -140,12 +146,12 @@ $('login').addEventListener('submit', async ev => {
     const params = new URLSearchParams();
     if (rd) params.set('rd', rd);
     if (isPublic) params.set('public', '1');
+    // Arming rides the login tap itself (the server mints the freeze
+    // token on the finish response) — a bare session can't arm devices.
+    if (trust === 'trust') params.set('trust', '1');
     const qs = params.toString() ? '?' + params.toString() : '';
     const done = await sendResult('/api/login/finish' + qs, result);
-    if (!isPublic) {
-      localStorage.setItem('stile_username', username);
-      if (trust === 'trust') await postJSON('/api/freeze/arm', {}).catch(() => {});
-    }
+    if (!isPublic) localStorage.setItem('stile_username', username);
     showMsg($('msg'), 'Welcome!', 'ok');
     location.replace(done.redirect || '/');
   } catch (err) {
@@ -168,15 +174,6 @@ $('forgetBtn').addEventListener('click', async () => {
   if (!confirm('Remove the emergency freeze token from this device?\n\nThis device will no longer be able to freeze the account without signing in.')) return;
   try { await postJSON('/api/freeze/forget', {}); } catch { /* best-effort */ }
   location.reload();
-});
-
-$('armBtn').addEventListener('click', async () => {
-  try {
-    await postJSON('/api/freeze/arm', {});
-    location.reload();
-  } catch (err) {
-    showMsg($('msg'), err.message || String(err), 'error');
-  }
 });
 
 $('disputeForm').addEventListener('submit', async ev => {

@@ -419,8 +419,12 @@ func (a *App) finishAssertion(w http.ResponseWriter, r *http.Request, kind strin
 		return nil, nil
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	rec := a.store.Get(p.Username)
-	if rec == nil || len(rec.Credentials) == 0 {
+	// Re-checked at finish time, not just begin: a freeze landing while
+	// the ceremony is in flight must abort it, or a thief who began a
+	// login pre-freeze could mint a cookie that sleeps through the
+	// dispute and wakes up valid after the admin clears it.
+	rec := a.assertableUser(p.Username)
+	if rec == nil {
 		jsonError(w, "login failed", http.StatusBadRequest)
 		return nil, nil
 	}
@@ -450,6 +454,17 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	public := r.URL.Query().Get("public") == "1"
 	a.setPortalCookie(w, rec.Username, rec.SessionEpoch, 0, public)
+	// Arming a device rides the login tap (trust=1): minting a 1-year
+	// deny capability is gated on key possession, never on a bare
+	// session — a transiently stolen session must not arm the thief's
+	// device with an irrevocable freeze loop.
+	if !public && r.URL.Query().Get("trust") == "1" {
+		if err := a.setFreezeCookie(w, rec.Username); err != nil {
+			log.Printf("arm freeze token for %s: %v", rec.Username, err)
+		} else {
+			log.Printf("device armed for %s at login (ip %s)", rec.Username, clientIP(r))
+		}
+	}
 	var cap time.Time
 	if public {
 		cap = time.Now().Add(publicSessionTTL)
@@ -511,8 +526,8 @@ func (a *App) handleStepupFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	rec := a.store.Get(p.Username)
-	if rec == nil || len(rec.Credentials) == 0 {
+	rec := a.assertableUser(p.Username)
+	if rec == nil {
 		jsonError(w, "login failed", http.StatusBadRequest)
 		return
 	}
@@ -800,6 +815,16 @@ func (a *App) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 
+	// Same finish-time re-check as assertions: a freeze mid-ceremony must
+	// abort enrollment, or a thief could plant a credential on a disputed
+	// account that survives both the dispute and every epoch bump. (A nil
+	// record is fine here — brand-new users are the point of enrollment.)
+	if rec := a.store.Get(p.Username); rec != nil && rec.Disputed {
+		log.Printf("enrollment aborted for %q: account disputed at finish (ip %s)", p.Username, clientIP(r))
+		jsonError(w, "enrollment failed", http.StatusBadRequest)
+		return
+	}
+
 	cred, err := a.wa.FinishRegistration(waUser{p.UserID, p.Username, nil}, p.Session, r)
 	if err != nil {
 		log.Printf("finish registration %s: %v", p.Username, err)
@@ -961,8 +986,32 @@ func (a *App) handleFreezeStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"armed": false})
 }
 
-// handleFreezeArm mints (or slides) the device's freeze token for the
-// signed-in user. Public-device sessions never arm.
+func (a *App) setFreezeCookie(w http.ResponseWriter, username string) error {
+	exp := time.Now().Add(a.cfg.FreezeTTL)
+	raw, err := signToken(a.cfg.SessionSecret, Token{
+		Type: tokenFreeze, Username: username,
+		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(),
+	})
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     freezeCookieName,
+		Value:    raw,
+		Path:     freezePath,
+		Expires:  exp,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
+}
+
+// handleFreezeArm SLIDES an existing freeze token's lifetime; it never
+// mints one. Minting happens only at login with the trust choice (the
+// login tap is the authorization), so a stolen session can't arm new
+// devices — and the username match keeps one user's authenticated visit
+// on a shared trusted device from silently clobbering another's token.
 func (a *App) handleFreezeArm(w http.ResponseWriter, r *http.Request) {
 	if !a.checkOrigin(r) {
 		jsonError(w, "bad origin", http.StatusForbidden)
@@ -977,24 +1026,14 @@ func (a *App) handleFreezeArm(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "public-device sessions don't arm devices", http.StatusBadRequest)
 		return
 	}
-	exp := time.Now().Add(a.cfg.FreezeTTL)
-	raw, err := signToken(a.cfg.SessionSecret, Token{
-		Type: tokenFreeze, Username: tok.Username,
-		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(),
-	})
-	if err != nil {
+	if holder := a.freezeTokenUser(r); holder == "" || holder != tok.Username {
+		jsonError(w, "arming happens at sign-in via the device-trust choice", http.StatusForbidden)
+		return
+	}
+	if err := a.setFreezeCookie(w, tok.Username); err != nil {
 		jsonError(w, "failed", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     freezeCookieName,
-		Value:    raw,
-		Path:     freezePath,
-		Expires:  exp,
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
 	writeJSON(w, map[string]string{"status": "armed"})
 }
 
@@ -1139,6 +1178,17 @@ func (a *App) takeCeremony(r *http.Request, kind string) (pendingCeremony, bool)
 		return pendingCeremony{}, false
 	}
 	return p, true
+}
+
+// assertableUser returns the record iff the account can authenticate at
+// all: exists, owns credentials, and is not disputed. Used at ceremony
+// begin AND finish so a freeze aborts anything in flight.
+func (a *App) assertableUser(username string) *UserRecord {
+	rec := a.store.Get(username)
+	if rec == nil || len(rec.Credentials) == 0 || rec.Disputed {
+		return nil
+	}
+	return rec
 }
 
 // waUser adapts a user record to the library's interface.

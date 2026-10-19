@@ -144,9 +144,11 @@ route @app {
 
 Freezing puts an account in a **disputed** state: epoch bump (all
 sessions die instantly) plus a flag that blocks login, step-up, ticket
-redemption and even invite redemption until an **admin clears the
-dispute** (a step-up-gated portal action, or editing `disputed` away in
-`users.json`).
+redemption and even invite redemption — **including ceremonies already in
+flight**, which are re-checked at finish time — until an **admin clears
+the dispute** (a step-up-gated portal action, or editing `disputed` away
+in `users.json`). Clearing bumps the epoch again, so nothing minted
+before or during the dispute survives into the cleared state.
 
 Who can pull the lever:
 
@@ -154,9 +156,13 @@ Who can pull the lever:
   a stolen session can do here is protect its victim).
 - **Any trusted device**, even signed out: at login on a token-less
   device you make a one-time explicit choice — *own device* keeps a
-  **freeze token**, a deny-only cookie scoped to the freeze endpoints. It
-  can only ever freeze its own account, never unlock anything, so it is
-  long-lived (`STILE_FREEZE_TTL`, default a year, sliding with use) and
+  **freeze token**, a deny-only cookie scoped to the freeze endpoints.
+  Minting rides the login tap itself (a bare session can never arm a
+  device, and renewal requires the device's own matching token — so a
+  stolen session can neither arm the thief's machine nor clobber another
+  user's token on a shared one). It can only ever freeze its own
+  account, never unlock anything, so it is long-lived
+  (`STILE_FREEZE_TTL`, default a year, sliding with use) and
   **deliberately survives epoch bumps and "sign out everywhere"** — an
   attacker's first move must not disarm your other devices. There is no
   remote revocation by design; each device can locally *Forget* its own
