@@ -68,12 +68,15 @@ let freeze = { armed: false };
 async function init() {
   const qs = rd ? '?rd=' + encodeURIComponent(rd) : '';
   let state = { authenticated: false };
-  try {
-    [state, freeze] = await Promise.all([
-      fetch('/api/session' + qs).then(r => r.json()),
-      fetch('/api/freeze/status').then(r => r.json()),
-    ]);
-  } catch { /* fall through to the login form */ }
+  // Deliberately NOT coupled: if the session endpoint hiccups, the
+  // freeze button on an armed device must still appear — it's the
+  // panic path.
+  const [sRes, fRes] = await Promise.allSettled([
+    fetch('/api/session' + qs).then(r => r.json()),
+    fetch('/api/freeze/status').then(r => r.json()),
+  ]);
+  if (sRes.status === 'fulfilled') state = sRes.value;
+  if (fRes.status === 'fulfilled') freeze = fRes.value;
 
   // Freeze buttons mirror the device's REAL capabilities, one per
   // distinct account it can freeze: the device token's user (shown even
@@ -81,7 +84,9 @@ async function init() {
   // hiding it would be theater: anyone here could log out and press it)
   // and the signed-in user when they differ.
   if (freeze.armed || state.authenticated) {
-    $('freezeWho').textContent = freeze.armed ? '"' + freeze.username + '"' : '';
+    $('freezeWho').textContent = freeze.armed
+      ? '"' + freeze.username + '"'
+      : (state.authenticated ? '"' + state.username + '"' : '');
     $('freezeBox').classList.remove('hidden');
     if (state.authenticated && freeze.armed && freeze.username !== state.username) {
       $('freezeSelfWho').textContent = '"' + state.username + '"';
@@ -100,9 +105,13 @@ async function init() {
         // non-public session only (the server enforces both).
         if (!state.public) postJSON('/api/freeze/arm', {}).catch(() => {});
       } else {
-        // Someone else's token: never silently clobber it. Arming for
-        // this user is an explicit login-time choice after a Forget.
+        // Someone else's token: never touch it from this session — no
+        // slide, and no one-click Forget either (destroying another
+        // user's panic button shouldn't be a casual affordance; the
+        // owner gets Forget when THEY sign in). Arming for this user
+        // is an explicit login-time choice.
         $('armedWho').textContent = ' for "' + freeze.username + '"';
+        $('forgetBtn').classList.add('hidden');
       }
     } else if (!state.public) {
       $('armRow').classList.remove('hidden');
