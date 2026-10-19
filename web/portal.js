@@ -43,8 +43,8 @@ async function loadKeys() {
       // All warnings come BEFORE any key tap — nobody should authenticate
       // their way into a refusal or a surprise.
       const warning = lastKey
-        ? '⚠️ "' + k.name + '" is your ONLY key.\n\nDeleting it LOCKS THIS ACCOUNT COMPLETELY: every session ends now, sign-in becomes impossible, and the only way back in is a fresh invite from an admin.\n\nDo this if the key is lost or stolen. Delete it?'
-        : 'Delete key "' + k.name + '"?\n\nThis also signs you out everywhere else (the key might be lost or stolen — all existing sessions are revoked). This browser stays signed in.';
+        ? '⚠️ "' + k.name + '" is your ONLY key.\n\nDeleting it LOCKS THIS ACCOUNT COMPLETELY: every session ends now, sign-in becomes impossible, and the only way back in is a fresh invite from an admin.\n\nThis is for RETIRING a key you still hold (the next step asks you to tap it). If the key is lost or stolen, use the Freeze button instead. Delete it?'
+        : 'Delete key "' + k.name + '"?\n\nThis also signs you out everywhere else (the key might be lost or distrusted — all existing sessions are revoked). This browser stays signed in.';
       if (!confirm(warning)) return;
       try {
         const action = await stepUp('delete-key');
