@@ -293,7 +293,7 @@ func TestVerifyServiceCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || w.Header().Get("Remote-User") != "ada" {
-		t.Fatalf("want 200/nick, got %d/%q", w.Code, w.Header().Get("Remote-User"))
+		t.Fatalf("want 200/ada, got %d/%q", w.Code, w.Header().Get("Remote-User"))
 	}
 }
 
