@@ -77,7 +77,9 @@ button.secondary { background: transparent; color: var(--muted); border: 1px sol
 .msg { min-height: 1.2rem; font-size: 0.9rem; }
 .msg.error { color: var(--error); }
 .msg.ok { color: var(--ok); }
-.hidden { display: none; }
+/* Utility class: must beat display-setting component classes (.choice, .row)
+   that appear later in this file — hence !important. */
+.hidden { display: none !important; }
 a { color: var(--accent); }
 h2 { margin: 0.5rem 0 0; font-size: 1rem; }
 .row { display: flex; gap: 0.5rem; }
