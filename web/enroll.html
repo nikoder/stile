@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stile — enroll a key</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="card">
+    <h1><span class="key">🔑</span> Enroll a key</h1>
+    <p class="hint">Registers a non-discoverable, presence-only credential on a
+      hardware key. Needs the enrollment token from the server config.</p>
+
+    <form id="enroll">
+      <label for="token">Enrollment token</label>
+      <input id="token" autocomplete="off" required>
+      <div style="height:0.4rem"></div>
+      <label for="username">Username</label>
+      <input id="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      <div style="height:0.4rem"></div>
+      <label for="keyname">Key name (e.g. "YubiKey main")</label>
+      <input id="keyname" autocomplete="off" required>
+      <div style="height:0.6rem"></div>
+      <button id="go" type="submit">Register &amp; tap key</button>
+    </form>
+
+    <p id="msg" class="msg"></p>
+    <p class="hint"><a href="/">← back to sign-in</a></p>
+  </main>
+
+  <script src="/static/webauthn.js"></script>
+  <script src="/static/enroll.js"></script>
+</body>
+</html>

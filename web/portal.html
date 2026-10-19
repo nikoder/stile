@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stile</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="card">
+    <h1><span class="key">🔑</span> stile</h1>
+
+    <form id="login" class="hidden">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" autocapitalize="none"
+             spellcheck="false" required autofocus>
+      <div style="height:0.4rem"></div>
+      <button id="go" type="submit">Sign in &amp; tap key</button>
+      <p class="hint">Presence-only hardware key. No password, no PIN.</p>
+    </form>
+
+    <div id="authed" class="hidden">
+      <p>Signed in as <strong id="who"></strong>.</p>
+      <p id="continue" class="hidden"><a id="continueLink" href="/">Continue to your destination →</a></p>
+      <button id="logout" class="secondary" type="button">Sign out</button>
+    </div>
+
+    <p id="msg" class="msg"></p>
+    <p id="enrollHint" class="hint hidden"><a href="/enroll">Enroll a new key →</a></p>
+  </main>
+
+  <script src="/static/webauthn.js"></script>
+  <script src="/static/portal.js"></script>
+</body>
+</html>
