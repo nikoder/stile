@@ -239,6 +239,16 @@ async function doFreeze(scope) {
     const landed = (!scope && st.armed) || (wasAuthenticated && !sess.authenticated);
     if (landed) {
       showMsg($('msg'), 'Account frozen. All sessions revoked; sign-in is blocked until an admin clears the dispute.', 'ok');
+      // The freeze killed OUR session too when it targeted our account —
+      // deliberately: a (possibly stolen) session must never survive by
+      // pressing freeze, and the disputed seal refuses it anyway. Swap
+      // the view to match instead of showing a dead signed-in state.
+      if (wasAuthenticated && !sess.authenticated) {
+        $('authed').classList.add('hidden');
+        $('adminBox').classList.add('hidden');
+        $('login').classList.remove('hidden');
+        renderFreezeBox();
+      }
     } else {
       showMsg($('msg'), 'FREEZE DID NOT TAKE EFFECT: this device holds no valid freeze token and no active session. Sign in to freeze, use another trusted device, or contact your admin.', 'error');
     }
