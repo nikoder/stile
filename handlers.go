@@ -348,12 +348,13 @@ func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "login failed", http.StatusBadRequest)
 		return
 	}
-	a.beginAssertion(w, r, rec, "login")
+	a.beginAssertion(w, r, rec, "login", "")
 }
 
 // beginAssertion starts a presence-only assertion ceremony against the
-// user's enrolled credentials (shared by login and step-up).
-func (a *App) beginAssertion(w http.ResponseWriter, r *http.Request, rec *UserRecord, kind string) {
+// user's enrolled credentials (shared by login and step-up). op is the
+// step-up operation riding the ceremony; empty for plain login.
+func (a *App) beginAssertion(w http.ResponseWriter, r *http.Request, rec *UserRecord, kind, op string) {
 	opts, sess, err := a.wa.BeginLogin(waUser{rec.ID, rec.Username, credentials(rec)},
 		webauthn.WithUserVerification(protocol.VerificationDiscouraged))
 	if err != nil {
@@ -361,7 +362,7 @@ func (a *App) beginAssertion(w http.ResponseWriter, r *http.Request, rec *UserRe
 		jsonError(w, "login failed", http.StatusBadRequest)
 		return
 	}
-	id := a.pending.Put(pendingCeremony{Kind: kind, Username: rec.Username, Session: *sess})
+	id := a.pending.Put(pendingCeremony{Kind: kind, Username: rec.Username, Op: op, Session: *sess})
 	a.setCeremonyCookie(w, id)
 	writeJSON(w, opts)
 }
@@ -443,16 +444,7 @@ func (a *App) handleStepupBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "unknown step-up operation", http.StatusBadRequest)
 		return
 	}
-	opts, sess, err := a.wa.BeginLogin(waUser{rec.ID, rec.Username, credentials(rec)},
-		webauthn.WithUserVerification(protocol.VerificationDiscouraged))
-	if err != nil {
-		log.Printf("begin stepup %s: %v", rec.Username, err)
-		jsonError(w, "login failed", http.StatusBadRequest)
-		return
-	}
-	id := a.pending.Put(pendingCeremony{Kind: "stepup", Username: rec.Username, Op: req.Op, Session: *sess})
-	a.setCeremonyCookie(w, id)
-	writeJSON(w, opts)
+	a.beginAssertion(w, r, rec, "stepup", req.Op)
 }
 
 func (a *App) handleStepupFinish(w http.ResponseWriter, r *http.Request) {
