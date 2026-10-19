@@ -194,8 +194,30 @@ $('login').addEventListener('submit', async ev => {
 async function doFreeze(scope) {
   if (!confirm('Freeze this account?\n\nEvery session on every device and app ends immediately and sign-in is blocked until an admin clears the dispute. Do this if a key is lost or stolen.')) return;
   try {
+    // Fresh pre-check at press time (not page-load state): a session that
+    // expired while the tab idled must not let "session died" later read
+    // as proof the freeze landed.
+    const pre = await fetch('/api/session').then(r => r.json()).catch(() => ({ authenticated: false }));
+    const wasAuthenticated = !!pre.authenticated;
     await postJSON('/api/freeze', scope ? { scope } : {});
-    showMsg($('msg'), 'Account frozen. All sessions revoked; sign-in is blocked until an admin clears the dispute.', 'ok');
+    // The server's answer is deliberately uniform (no oracle for
+    // outsiders), so verify truthfully with information this DEVICE is
+    // already entitled to: its own token validity and session state.
+    // False "success" to a panicking owner whose token was disarmed
+    // would be the worst possible failure mode here.
+    const [st, sess] = await Promise.all([
+      fetch('/api/freeze/status').then(r => r.json()).catch(() => ({ armed: false })),
+      fetch('/api/session').then(r => r.json()).catch(() => ({ authenticated: true })),
+    ]);
+    // Token path proof: a still-valid token means the freeze landed on
+    // its account (tokens survive their own freeze). Session path proof:
+    // our session just died (the freeze bumps the epoch).
+    const landed = (!scope && st.armed) || (wasAuthenticated && !sess.authenticated);
+    if (landed) {
+      showMsg($('msg'), 'Account frozen. All sessions revoked; sign-in is blocked until an admin clears the dispute.', 'ok');
+    } else {
+      showMsg($('msg'), 'FREEZE DID NOT TAKE EFFECT: this device holds no valid freeze token and no active session. Sign in to freeze, use another trusted device, or contact your admin.', 'error');
+    }
   } catch (err) {
     showMsg($('msg'), err.message || String(err), 'error');
   }
