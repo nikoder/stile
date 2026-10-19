@@ -1336,3 +1336,33 @@ func TestFreezeDisarmEndpointGates(t *testing.T) {
 		t.Fatal("freeze epoch not bumped")
 	}
 }
+
+// On a device carrying another user's freeze token, scope=session lets
+// the signed-in user freeze THEMSELVES; the default still freezes the
+// token's account. Neither path is shadowed by the other.
+func TestFreezeScopeSession(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "alice") // token holder (device owner)
+	addFakeUser(t, app, "bob")   // signed-in guest
+	cookies := []*http.Cookie{freezeCookie(t, app, "alice"), portalCookie(t, app, "bob")}
+
+	w := postAs(h, "/api/freeze", "https://tap.example.com", cookies, map[string]string{"scope": "session"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("freeze: %d: %s", w.Code, w.Body)
+	}
+	if app.store.Get("alice").Disputed {
+		t.Fatal("scope=session froze the token holder")
+	}
+	if !app.store.Get("bob").Disputed {
+		t.Fatal("scope=session did not freeze the session user")
+	}
+
+	// Default scope: the token's account.
+	w2 := postAs(h, "/api/freeze", "https://tap.example.com", cookies, map[string]string{})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("freeze: %d: %s", w2.Code, w2.Body)
+	}
+	if !app.store.Get("alice").Disputed {
+		t.Fatal("default scope did not freeze the token holder")
+	}
+}

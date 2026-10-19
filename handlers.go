@@ -966,7 +966,20 @@ func (a *App) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "slow down", http.StatusTooManyRequests)
 		return
 	}
-	username := a.freezeTokenUser(r)
+	var req struct {
+		// "session" freezes the signed-in account even when the device
+		// carries another user's freeze token (which otherwise takes
+		// precedence) — without it, a guest's own session-freeze would be
+		// shadowed on a device trusted by someone else.
+		Scope string `json:"scope"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	username := ""
+	if req.Scope != "session" {
+		username = a.freezeTokenUser(r)
+	}
 	if username == "" {
 		if tok, _, ok := a.checkPortalSession(r); ok {
 			username = tok.Username

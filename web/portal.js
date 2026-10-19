@@ -75,11 +75,18 @@ async function init() {
     ]);
   } catch { /* fall through to the login form */ }
 
-  // The freeze button works with a device token OR a live session —
-  // visible whenever either exists.
+  // Freeze buttons mirror the device's REAL capabilities, one per
+  // distinct account it can freeze: the device token's user (shown even
+  // to other logged-in users — the capability is the device's, and
+  // hiding it would be theater: anyone here could log out and press it)
+  // and the signed-in user when they differ.
   if (freeze.armed || state.authenticated) {
     $('freezeWho').textContent = freeze.armed ? '"' + freeze.username + '"' : '';
     $('freezeBox').classList.remove('hidden');
+    if (state.authenticated && freeze.armed && freeze.username !== state.username) {
+      $('freezeSelfWho').textContent = '"' + state.username + '"';
+      $('freezeSelfBtn').classList.remove('hidden');
+    }
   }
 
   if (state.authenticated) {
@@ -175,15 +182,18 @@ $('login').addEventListener('submit', async ev => {
   }
 });
 
-$('freezeBtn').addEventListener('click', async () => {
+async function doFreeze(scope) {
   if (!confirm('Freeze this account?\n\nEvery session on every device and app ends immediately and sign-in is blocked until an admin clears the dispute. Do this if a key is lost or stolen.')) return;
   try {
-    await postJSON('/api/freeze', {});
+    await postJSON('/api/freeze', scope ? { scope } : {});
     showMsg($('msg'), 'Account frozen. All sessions revoked; sign-in is blocked until an admin clears the dispute.', 'ok');
   } catch (err) {
     showMsg($('msg'), err.message || String(err), 'error');
   }
-});
+}
+
+$('freezeBtn').addEventListener('click', () => doFreeze(''));
+$('freezeSelfBtn').addEventListener('click', () => doFreeze('session'));
 
 $('forgetBtn').addEventListener('click', async () => {
   if (!confirm('Remove the emergency freeze token from this device?\n\nThis device will no longer be able to freeze the account without signing in.')) return;
