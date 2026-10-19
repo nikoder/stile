@@ -5,6 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -973,7 +975,12 @@ func (a *App) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		// shadowed on a device trusted by someone else.
 		Scope string `json:"scope"`
 	}
-	if !readJSON(w, r, &req) {
+	// Panic-path tolerance: an EMPTY body means default scope — a
+	// hand-rolled curl in a genuine emergency must not 400 over a missing
+	// '{}'. Malformed non-empty JSON still fails: silently defaulting a
+	// mangled scope could freeze the wrong account.
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		jsonError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	username := ""

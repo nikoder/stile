@@ -1366,3 +1366,30 @@ func TestFreezeScopeSession(t *testing.T) {
 		t.Fatal("default scope did not freeze the token holder")
 	}
 }
+
+// The panic path tolerates a bodyless POST (default scope); malformed
+// non-empty JSON still fails rather than silently defaulting the scope.
+func TestFreezeEmptyBodyTolerated(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+
+	r := httptest.NewRequest("POST", "/api/freeze", nil)
+	r.Header.Set("Origin", "https://tap.example.com")
+	r.AddCookie(freezeCookie(t, app, "nick"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bodyless freeze: want 200, got %d", w.Code)
+	}
+	if !app.store.Get("nick").Disputed {
+		t.Fatal("bodyless freeze did not freeze")
+	}
+
+	r2 := httptest.NewRequest("POST", "/api/freeze", strings.NewReader("{garbage"))
+	r2.Header.Set("Origin", "https://tap.example.com")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("malformed body: want 400, got %d", w2.Code)
+	}
+}
