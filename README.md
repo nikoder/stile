@@ -131,6 +131,15 @@ route @app {
   way back in is a fresh admin invite. (If you no longer *hold* any key,
   you can't pass the step-up — an admin deletes the user or bumps their
   `session_epoch` in `users.json` instead, then re-invites.)
+- **Stolen-key remediation is three steps, not one**: an attacker holding
+  the key (and your username) may already have signed in and **added a key
+  of their own**. Deleting the stolen key and revoking sessions does not
+  evict that credential — always review the key list and delete anything
+  you don't recognize. (Emptying the account via last-key delete sidesteps
+  this; a selective delete does not.)
+- Re-inviting a username restores its existing record — **including an
+  Admin flag it previously carried**. If you hand out invites for
+  usernames you didn't create, check `users.json` first.
 
 Credentials are non-discoverable: they consume **no** storage slots on the
 key, and the key never needs a PIN set at any point.
