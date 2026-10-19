@@ -14,10 +14,25 @@
       <label for="username">Username</label>
       <input id="username" name="username" autocomplete="username" autocapitalize="none"
              spellcheck="false" required autofocus>
+      <div id="trustChoice" class="choice hidden">
+        <p class="hint"><strong>New device.</strong> Keep an emergency
+          freeze token here? It can only ever <em>freeze</em> your account
+          (never unlock anything) and lets this device act if a key is
+          ever stolen.</p>
+        <label><input type="radio" name="trust" value="trust"> My own device — keep the freeze token</label>
+        <label><input type="radio" name="trust" value="public"> Public or shared device — keep nothing</label>
+      </div>
       <div style="height:0.4rem"></div>
       <button id="go" type="submit">Sign in &amp; tap key</button>
       <p class="hint">Presence-only hardware key. No password, no PIN.</p>
     </form>
+
+    <div id="freezeBox" class="hidden">
+      <button id="freezeBtn" class="danger-solid" type="button">🧊 Freeze account <span id="freezeWho"></span></button>
+      <p class="hint">Emergency stop: revokes every session and blocks all
+        sign-ins until an admin clears the dispute. Use it if a key is
+        lost or stolen.</p>
+    </div>
 
     <div id="authed" class="hidden">
       <p>Signed in as <strong id="who"></strong>.</p>
@@ -32,7 +47,11 @@
       </div>
       <p class="hint">Adding or removing a key asks for a fresh tap of an
         existing key first. "Sign out everywhere" revokes every session on
-        every device and app — it's also the panic button.</p>
+        every device and app.</p>
+
+      <p id="armedRow" class="hint hidden">🧊 Emergency freeze is armed on
+        this device. <button id="forgetBtn" type="button" class="mini">Forget</button></p>
+      <p id="armRow" class="hint hidden"><button id="armBtn" type="button" class="mini">Arm emergency freeze on this device</button></p>
 
       <div id="adminBox" class="hidden">
         <h2>Invite (admin)</h2>
@@ -45,6 +64,12 @@
           <button id="inviteCopy" type="button" class="secondary">Copy</button>
         </div>
         <p id="inviteNote" class="hint"></p>
+
+        <h2>Clear a dispute (admin)</h2>
+        <form id="disputeForm" class="row">
+          <input id="disputeUser" placeholder="username" autocapitalize="none" spellcheck="false" required>
+          <button type="submit" class="secondary">Unfreeze</button>
+        </form>
       </div>
     </div>
 

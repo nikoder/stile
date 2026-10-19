@@ -33,6 +33,15 @@ const (
 	ceremonyCookie = "stile_ceremony"
 	ticketParam    = "stile_ticket"
 
+	// The freeze cookie is path-scoped to its own endpoints: the browser
+	// never attaches it to anything else, so it can only leak via direct
+	// cookie-jar extraction.
+	freezeCookieName = "stile_freeze"
+	freezePath       = "/api/freeze"
+
+	// Public-device sessions: short, never renewed.
+	publicSessionTTL = time.Hour
+
 	ticketTTL = 30 * time.Second // portal → app bounce
 	actionTTL = 2 * time.Minute  // step-up tap → sensitive operation
 	inviteTTL = 15 * time.Minute // admin invite → enrollment
@@ -44,7 +53,7 @@ const (
 
 // stepUpOps are the operations a step-up tap can authorize; the client
 // declares one up front and the minted action token spends only on it.
-var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true}
+var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true, "clear-dispute": true}
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9._-]{1,32}$`)
 
@@ -75,6 +84,11 @@ func (a *App) Routes(static fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/invite", a.handleInvite)
 	mux.HandleFunc("POST /api/logout", a.handleLogout)
 	mux.HandleFunc("POST /api/logout-all", a.handleLogoutAll)
+	mux.HandleFunc("POST /api/freeze", a.handleFreeze)
+	mux.HandleFunc("GET /api/freeze/status", a.handleFreezeStatus)
+	mux.HandleFunc("POST /api/freeze/arm", a.handleFreezeArm)
+	mux.HandleFunc("POST /api/freeze/forget", a.handleFreezeForget)
+	mux.HandleFunc("POST /api/dispute/clear", a.handleDisputeClear)
 
 	return securityHeaders(mux)
 }
@@ -163,10 +177,10 @@ func (a *App) redeemTicket(w http.ResponseWriter, r *http.Request, fwdHost strin
 		return false
 	}
 	rec := a.store.Get(e.Username)
-	if rec == nil || len(rec.Credentials) == 0 {
+	if rec == nil || len(rec.Credentials) == 0 || rec.Disputed {
 		return false
 	}
-	a.setServiceCookie(w, e.Username, fwdHost, rec.SessionEpoch)
+	a.setServiceCookie(w, e.Username, fwdHost, rec.SessionEpoch, e.SvcCap)
 	q.Del(ticketParam)
 	u.RawQuery = q.Encode()
 	http.Redirect(w, r, fwdProto(r)+"://"+fwdHost+u.String(), http.StatusFound)
@@ -184,7 +198,7 @@ func (a *App) checkServiceToken(r *http.Request, fwdHost string) (Token, bool) {
 		return Token{}, false
 	}
 	rec := a.store.Get(tok.Username)
-	if rec == nil || len(rec.Credentials) == 0 || rec.SessionEpoch != tok.Epoch {
+	if rec == nil || len(rec.Credentials) == 0 || rec.SessionEpoch != tok.Epoch || rec.Disputed {
 		return Token{}, false
 	}
 	return tok, true
@@ -202,28 +216,39 @@ func (a *App) checkPortalSession(r *http.Request) (Token, *UserRecord, bool) {
 		return Token{}, nil, false
 	}
 	rec := a.store.Get(tok.Username)
-	if rec == nil || len(rec.Credentials) == 0 || rec.SessionEpoch != tok.Epoch {
+	if rec == nil || len(rec.Credentials) == 0 || rec.SessionEpoch != tok.Epoch || rec.Disputed {
 		return Token{}, nil, false
 	}
 	return tok, rec, true
 }
 
 // setPortalCookie mints the portal session cookie. first is the original
-// login time carried across renewals; pass 0 for a fresh login.
-func (a *App) setPortalCookie(w http.ResponseWriter, username string, epoch, first int64) {
+// login time carried across renewals; pass 0 for a fresh login. noRenew
+// marks a public-device session: short-lived and never renewed.
+func (a *App) setPortalCookie(w http.ResponseWriter, username string, epoch, first int64, noRenew bool) {
 	now := time.Now()
 	if first == 0 {
 		first = now.Unix()
 	}
-	exp := now.Add(a.cfg.SessionTTL)
+	ttl := a.cfg.SessionTTL
+	if noRenew && ttl > publicSessionTTL {
+		ttl = publicSessionTTL
+	}
+	exp := now.Add(ttl)
 	a.setCookie(w, a.cfg.CookieName, Token{
 		Type: tokenPortal, Username: username,
 		IssuedAt: now.Unix(), First: first, Expiry: exp.Unix(), Epoch: epoch,
+		NoRenew: noRenew,
 	}, exp)
 }
 
-func (a *App) setServiceCookie(w http.ResponseWriter, username, host string, epoch int64) {
+// setServiceCookie mints a host-bound service cookie; a non-zero cap
+// (from a public-device session's ticket) shortens it.
+func (a *App) setServiceCookie(w http.ResponseWriter, username, host string, epoch int64, cap time.Time) {
 	exp := time.Now().Add(a.cfg.SvcTTL)
+	if !cap.IsZero() && cap.Before(exp) {
+		exp = cap
+	}
 	a.setCookie(w, svcCookieName, Token{
 		Type: tokenSvc, Username: username, Host: host,
 		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(), Epoch: epoch,
@@ -264,18 +289,21 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		resp["authenticated"] = true
 		resp["username"] = tok.Username
 		resp["admin"] = a.isAdmin(rec)
+		resp["public"] = tok.NoRenew
 		// Sliding renewal belongs here: the browser talks to the portal
 		// origin directly, so Set-Cookie actually lands (on forward_auth
 		// 2xx responses Caddy discards it). Renewal stops once the session
 		// lineage is older than maxPortalLineage — a stolen cookie can't
-		// renew itself forever.
+		// renew itself forever — and never happens for public-device
+		// sessions.
 		first := tok.First
 		if first == 0 {
 			first = tok.IssuedAt
 		}
-		if time.Until(time.Unix(tok.Expiry, 0)) < a.cfg.SessionTTL/2 &&
+		if !tok.NoRenew &&
+			time.Until(time.Unix(tok.Expiry, 0)) < a.cfg.SessionTTL/2 &&
 			time.Since(time.Unix(first, 0)) < maxPortalLineage {
-			a.setPortalCookie(w, tok.Username, rec.SessionEpoch, first)
+			a.setPortalCookie(w, tok.Username, rec.SessionEpoch, first, false)
 		}
 	}
 	// The portal echoes ?rd= back through the server so redirect targets
@@ -309,12 +337,22 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bad redirect target", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]string{"redirect": a.ticketRedirect(tok.Username, target)})
+	writeJSON(w, map[string]string{"redirect": a.ticketRedirect(tok.Username, target, svcCapFor(tok))})
+}
+
+// svcCapFor derives the service-cookie expiry cap a session imposes on
+// its tickets: public-device sessions must not spawn cookies that
+// outlive them.
+func svcCapFor(tok Token) time.Time {
+	if tok.NoRenew {
+		return time.Unix(tok.Expiry, 0)
+	}
+	return time.Time{}
 }
 
 // ticketRedirect appends a one-time ticket to an app-host target; targets
 // on the portal host itself pass through untouched.
-func (a *App) ticketRedirect(username, target string) string {
+func (a *App) ticketRedirect(username, target string, svcCap time.Time) string {
 	u, err := url.Parse(target)
 	// Hostname comparison on purpose: an explicit default port in the rd
 	// (tap.example.com:443) must not slip past the portal exclusion and
@@ -322,7 +360,7 @@ func (a *App) ticketRedirect(username, target string) string {
 	if err != nil || strings.EqualFold(u.Hostname(), a.cfg.PortalURL.Hostname()) {
 		return target
 	}
-	code := a.codes.Put(codeEntry{Kind: "ticket", Username: username, Host: u.Host}, ticketTTL)
+	code := a.codes.Put(codeEntry{Kind: "ticket", Username: username, Host: u.Host, SvcCap: svcCap}, ticketTTL)
 	q := u.Query()
 	q.Set(ticketParam, code)
 	u.RawQuery = q.Encode()
@@ -342,8 +380,9 @@ func (a *App) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
 	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
 
 	rec := a.store.Get(req.Username)
-	if !usernameRe.MatchString(req.Username) || rec == nil || len(rec.Credentials) == 0 {
-		// Uniform failure: don't leak which usernames exist.
+	if !usernameRe.MatchString(req.Username) || rec == nil || len(rec.Credentials) == 0 || rec.Disputed {
+		// Uniform failure: don't leak which usernames exist (or which are
+		// frozen — the thief holding the key learns nothing here).
 		a.limiter.Allow("fail:"+clientIP(r), 10)
 		jsonError(w, "login failed", http.StatusBadRequest)
 		return
@@ -409,14 +448,19 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	if rec == nil {
 		return
 	}
-	a.setPortalCookie(w, rec.Username, rec.SessionEpoch, 0)
+	public := r.URL.Query().Get("public") == "1"
+	a.setPortalCookie(w, rec.Username, rec.SessionEpoch, 0, public)
+	var cap time.Time
+	if public {
+		cap = time.Now().Add(publicSessionTTL)
+	}
 	redirect := a.safeRedirect(r.URL.Query().Get("rd"))
 	if redirect == "" {
 		redirect = a.cfg.PortalURL.String() + "/"
 	} else {
-		redirect = a.ticketRedirect(rec.Username, redirect)
+		redirect = a.ticketRedirect(rec.Username, redirect, cap)
 	}
-	log.Printf("login ok: %s (key %q, ip %s)", rec.Username, credentialName(rec, cred), clientIP(r))
+	log.Printf("login ok: %s (key %q, public=%v, ip %s)", rec.Username, credentialName(rec, cred), public, clientIP(r))
 	writeJSON(w, map[string]string{"redirect": redirect})
 }
 
@@ -606,7 +650,7 @@ func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rec2 := a.store.Get(tok.Username); rec2 != nil {
-		a.setPortalCookie(w, tok.Username, rec2.SessionEpoch, 0)
+		a.setPortalCookie(w, tok.Username, rec2.SessionEpoch, 0, tok.NoRenew)
 	}
 	log.Printf("key deleted: %s — epoch bumped, outstanding sessions revoked (ip %s)", tok.Username, clientIP(r))
 	writeJSON(w, map[string]string{"status": "deleted"})
@@ -685,6 +729,13 @@ func (a *App) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 		if !ok || e.Username != req.Username {
 			a.limiter.Allow("fail:"+clientIP(r), 10)
 			log.Printf("enrollment refused for %q: invalid invite (ip %s)", req.Username, clientIP(r))
+			jsonError(w, "enrollment refused", http.StatusForbidden)
+			return
+		}
+		// A disputed account stays sealed until an admin clears it — even
+		// against an invite minted before the freeze.
+		if rec := a.store.Get(req.Username); rec != nil && rec.Disputed {
+			log.Printf("enrollment refused for %q: account disputed (ip %s)", req.Username, clientIP(r))
 			jsonError(w, "enrollment refused", http.StatusForbidden)
 			return
 		}
@@ -799,6 +850,10 @@ func (a *App) handleInvite(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "username must match [a-z0-9._-]{1,32}", http.StatusBadRequest)
 		return
 	}
+	if target := a.store.Get(req.Username); target != nil && target.Disputed {
+		jsonError(w, "account is disputed — clear the dispute first", http.StatusConflict)
+		return
+	}
 	code := a.codes.Put(codeEntry{Kind: "invite", Username: req.Username}, inviteTTL)
 	link := a.cfg.PortalURL.String() + "/enroll?invite=" + url.QueryEscape(code) +
 		"&username=" + url.QueryEscape(req.Username)
@@ -842,6 +897,158 @@ func (a *App) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	})
 	log.Printf("logout-all: %s — epoch bumped, all sessions revoked (ip %s)", tok.Username, clientIP(r))
 	writeJSON(w, map[string]string{"status": "logged out everywhere"})
+}
+
+// ---- emergency freeze --------------------------------------------------------
+//
+// The scenario: your (possibly only) key is stolen and the thief may hold
+// live sessions. You can't step-up — the needed key is gone — but any
+// device you previously trusted still carries a deny-only freeze token.
+// One click there disputes the account: epoch bump + Disputed flag, so
+// nothing signs in until an admin clears it. Freeze tokens have no
+// server-side registry and carry no epoch, so there is deliberately NO
+// remote way to disarm the victim's devices.
+
+func (a *App) freezeTokenUser(r *http.Request) string {
+	c, err := r.Cookie(freezeCookieName)
+	if err != nil {
+		return ""
+	}
+	tok, err := verifyToken(a.cfg.SessionSecret, tokenFreeze, c.Value, time.Now())
+	if err != nil {
+		return ""
+	}
+	return tok.Username
+}
+
+// handleFreeze disputes the account named by the device's freeze token,
+// or by the portal session. The response is uniform regardless of
+// outcome: no oracle about tokens, users or dispute state.
+func (a *App) handleFreeze(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	if !a.limiter.Allow("freeze:"+clientIP(r), 20) {
+		jsonError(w, "slow down", http.StatusTooManyRequests)
+		return
+	}
+	username := a.freezeTokenUser(r)
+	if username == "" {
+		if tok, _, ok := a.checkPortalSession(r); ok {
+			username = tok.Username
+		}
+	}
+	if username != "" {
+		if err := a.store.Freeze(username); err != nil {
+			log.Printf("freeze failed for %q: %v (ip %s)", username, err, clientIP(r))
+		} else {
+			log.Printf("FROZEN: %s — account disputed, all sessions revoked (ip %s)", username, clientIP(r))
+		}
+	} else {
+		log.Printf("freeze request with no credential (ip %s)", clientIP(r))
+	}
+	writeJSON(w, map[string]string{"status": "frozen"})
+}
+
+// handleFreezeStatus tells the requesting DEVICE whether it carries a
+// valid freeze token (the cookie is HttpOnly, so the page can't look).
+func (a *App) handleFreezeStatus(w http.ResponseWriter, r *http.Request) {
+	if username := a.freezeTokenUser(r); username != "" {
+		writeJSON(w, map[string]any{"armed": true, "username": username})
+		return
+	}
+	writeJSON(w, map[string]any{"armed": false})
+}
+
+// handleFreezeArm mints (or slides) the device's freeze token for the
+// signed-in user. Public-device sessions never arm.
+func (a *App) handleFreezeArm(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	tok, _, ok := a.checkPortalSession(r)
+	if !ok {
+		jsonError(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	if tok.NoRenew {
+		jsonError(w, "public-device sessions don't arm devices", http.StatusBadRequest)
+		return
+	}
+	exp := time.Now().Add(a.cfg.FreezeTTL)
+	raw, err := signToken(a.cfg.SessionSecret, Token{
+		Type: tokenFreeze, Username: tok.Username,
+		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(),
+	})
+	if err != nil {
+		jsonError(w, "failed", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     freezeCookieName,
+		Value:    raw,
+		Path:     freezePath,
+		Expires:  exp,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(w, map[string]string{"status": "armed"})
+}
+
+// handleFreezeForget clears THIS device's freeze token. Local-only by
+// construction: a Set-Cookie lands only on the requesting device.
+func (a *App) handleFreezeForget(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: freezeCookieName, Value: "", Path: freezePath, MaxAge: -1,
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(w, map[string]string{"status": "forgotten"})
+}
+
+// handleDisputeClear unfreezes an account: admin + fresh tap.
+func (a *App) handleDisputeClear(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	tok, rec, ok := a.checkPortalSession(r)
+	if !ok {
+		jsonError(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	if !a.isAdmin(rec) {
+		jsonError(w, "admin only", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Username    string `json:"username"`
+		ActionToken string `json:"action_token"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if !a.consumeAction(tok.Username, req.ActionToken, "clear-dispute") {
+		jsonError(w, "step-up required", http.StatusForbidden)
+		return
+	}
+	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
+	if !usernameRe.MatchString(req.Username) {
+		jsonError(w, "username must match [a-z0-9._-]{1,32}", http.StatusBadRequest)
+		return
+	}
+	if err := a.store.ClearDispute(req.Username); err != nil {
+		jsonError(w, "clear failed", http.StatusBadRequest)
+		return
+	}
+	log.Printf("dispute cleared for %q by %s (ip %s)", req.Username, tok.Username, clientIP(r))
+	writeJSON(w, map[string]string{"status": "cleared"})
 }
 
 // ---- helpers ----------------------------------------------------------------

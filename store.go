@@ -36,9 +36,13 @@ type UserRecord struct {
 	// it was minted under and is rejected on mismatch. Bump this number
 	// (edit users.json — the file is re-read on change) to kill every
 	// outstanding session for the user at once.
-	SessionEpoch int64              `json:"session_epoch"`
-	CreatedAt    time.Time          `json:"created_at"`
-	Credentials  []StoredCredential `json:"credentials"`
+	SessionEpoch int64 `json:"session_epoch"`
+	// Disputed is the frozen state: no login, step-up, ticket redemption
+	// or invite works for the account until an admin clears it (or the
+	// flag is edited away in users.json).
+	Disputed    bool               `json:"disputed,omitempty"`
+	CreatedAt   time.Time          `json:"created_at"`
+	Credentials []StoredCredential `json:"credentials"`
 }
 
 // Store is a mutex-guarded JSON file. The whole dataset is a handful of
@@ -186,10 +190,11 @@ func (s *Store) RenameCredential(username string, credID []byte, name string) er
 // DeleteCredential removes a credential. Deleting a key is treated as a
 // revocation event (keys get deleted because they're lost or distrusted),
 // so the epoch is bumped: every outstanding session dies, including ones
-// that key minted. Deleting the LAST credential is allowed — a stolen key
-// must be deletable even when it's the only one — and leaves the account
-// credential-less: nothing can sign in until an admin invite re-enrolls
-// it. The handler demands an explicit confirmation for that case.
+// that key minted. Deleting the LAST credential is allowed — its honest
+// use is decommissioning a key you still hold (the step-up needs it) —
+// and leaves the account credential-less until an admin invite
+// re-enrolls it. The handler demands an explicit confirmation for that
+// case. The stolen-key scenario is the freeze flow's job, not this one's.
 func (s *Store) DeleteCredential(username string, credID []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,6 +211,38 @@ func (s *Store) DeleteCredential(username string, credID []byte) error {
 		}
 	}
 	return fmt.Errorf("unknown credential for %q", username)
+}
+
+// Freeze puts the account in the disputed state and revokes everything
+// outstanding. Idempotent: freezing a frozen account is a no-op.
+func (s *Store) Freeze(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeReloadLocked()
+	rec, ok := s.data[username]
+	if !ok {
+		return fmt.Errorf("unknown user %q", username)
+	}
+	if rec.Disputed {
+		return nil
+	}
+	rec.Disputed = true
+	rec.SessionEpoch++
+	return s.saveLocked()
+}
+
+// ClearDispute unfreezes the account. Sessions stay dead (the freeze
+// already bumped the epoch); the user signs in fresh.
+func (s *Store) ClearDispute(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeReloadLocked()
+	rec, ok := s.data[username]
+	if !ok {
+		return fmt.Errorf("unknown user %q", username)
+	}
+	rec.Disputed = false
+	return s.saveLocked()
 }
 
 // BumpEpoch invalidates every outstanding cookie for the user ("sign out

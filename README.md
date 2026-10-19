@@ -68,7 +68,8 @@ Other sharp edges, stated plainly:
   load-bearing.
 - The portal remembers the last username in localStorage, so on a
   previously-used machine a borrowed key alone signs in — coherent with
-  the accepted physical-theft trade-off, but know it's there.
+  the accepted physical-theft trade-off, but know it's there. (Public
+  device mode at login skips it.)
 
 ## Deployment
 
@@ -106,6 +107,7 @@ route @app {
 | `STILE_ADMIN_USERS` | *(unset)* | Comma-separated extra admin usernames |
 | `STILE_SESSION_TTL` | `720h` | Portal session lifetime (sliding) |
 | `STILE_SVC_TTL` | `8h` | Per-app service cookie lifetime |
+| `STILE_FREEZE_TTL` | `8760h` | Device freeze-token lifetime (slides on portal use) |
 | `STILE_LISTEN` | `:9092` | Bind address |
 | `STILE_DATA` | `/data` | Directory for `users.json` |
 | `STILE_EXTRA_ORIGINS` | *(unset)* | Comma-separated additional WebAuthn origins |
@@ -130,16 +132,44 @@ route @app {
   (retiring it, emptying a test account): the account goes
   credential-less, every session dies, and the way back in is a fresh
   admin invite.
-- **If a key is stolen, you are in a race** — and if it was your only
-  key, self-service can't win it: the step-up needs a key you no longer
-  have. An attacker holding the key (and your username) can sign in,
-  add a credential of their own, and delete yours. Remediation while you
-  still hold a second key: revoke sessions, delete the stolen key, and
-  **audit the key list for anything you don't recognize**. Remediation
-  once you've lost control of the account: the admin (ultimately,
-  whoever can edit `users.json` on the host — the terminal root of
-  trust) deletes the user or bumps their `session_epoch`, then
-  re-invites. There is no in-protocol substitute for that backstop.
+- **If a key is stolen, you are in a race**: an attacker holding the key
+  (and your username) can sign in, add a credential of their own, and
+  delete yours. The way to win the race is the **emergency freeze**
+  (below) — freeze first, sort out credentials afterwards. When
+  un-freezing and cleaning up, always **audit the key list for anything
+  you don't recognize**. The terminal backstop remains whoever can edit
+  `users.json` on the host; there is no in-protocol substitute for it.
+
+## Emergency freeze
+
+Freezing puts an account in a **disputed** state: epoch bump (all
+sessions die instantly) plus a flag that blocks login, step-up, ticket
+redemption and even invite redemption until an **admin clears the
+dispute** (a step-up-gated portal action, or editing `disputed` away in
+`users.json`).
+
+Who can pull the lever:
+
+- **Any signed-in session** of the account (no step-up needed — the worst
+  a stolen session can do here is protect its victim).
+- **Any trusted device**, even signed out: at login on a token-less
+  device you make a one-time explicit choice — *own device* keeps a
+  **freeze token**, a deny-only cookie scoped to the freeze endpoints. It
+  can only ever freeze its own account, never unlock anything, so it is
+  long-lived (`STILE_FREEZE_TTL`, default a year, sliding with use) and
+  **deliberately survives epoch bumps and "sign out everywhere"** — an
+  attacker's first move must not disarm your other devices. There is no
+  remote revocation by design; each device can locally *Forget* its own
+  token, and that is the only way one dies early (besides expiry, secret
+  rotation, or user deletion).
+- Choosing **public or shared device** instead keeps nothing: no freeze
+  token, no remembered username, a short (1 h) non-renewing session, and
+  service cookies capped to it.
+
+Worst-case analysis of a leaked freeze token (stolen cookie jar, old
+device backup): targeted denial of service of one account — it grants
+nothing. Residual gap, stated honestly: if every trusted device is lost
+*along with* the key, freezing falls back to the admin/host path.
 - Re-inviting a username restores its existing record — **including an
   Admin flag it previously carried**. If you hand out invites for
   usernames you didn't create, check `users.json` first.

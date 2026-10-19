@@ -42,6 +42,7 @@ type Config struct {
 	SessionSecret  []byte        // HMAC key for all tokens (>= 32 bytes)
 	SessionTTL     time.Duration // portal session lifetime (sliding)
 	SvcTTL         time.Duration // per-app service cookie lifetime (re-bounce is silent)
+	FreezeTTL      time.Duration // device freeze-token lifetime (slides on portal use)
 	BootstrapToken string        // enrolls the FIRST user only; invites after that
 	AdminUsers     []string      // extra admins beside the bootstrap user
 	DataDir        string        // where users.json lives
@@ -109,6 +110,12 @@ func loadConfig() (*Config, error) {
 	cfg.SvcTTL, err = time.ParseDuration(svcTTL)
 	if err != nil || cfg.SvcTTL <= 0 {
 		return nil, fmt.Errorf("STILE_SVC_TTL %q is not a positive Go duration", svcTTL)
+	}
+
+	freezeTTL := envDefault("STILE_FREEZE_TTL", "8760h") // one year
+	cfg.FreezeTTL, err = time.ParseDuration(freezeTTL)
+	if err != nil || cfg.FreezeTTL <= 0 {
+		return nil, fmt.Errorf("STILE_FREEZE_TTL %q is not a positive Go duration", freezeTTL)
 	}
 
 	return cfg, nil

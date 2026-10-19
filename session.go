@@ -20,9 +20,16 @@ import (
 //     bound to that host. Minted by redeeming a one-time ticket from the
 //     portal. A compromised backend can replay it only against itself,
 //     and only until it expires or the user's epoch is bumped.
+//   - "freeze": a deny-only capability held by a trusted DEVICE, scoped to
+//     the freeze endpoints. It can only freeze its account — never grant
+//     access — so it is long-lived, survives epoch bumps on purpose (the
+//     attacker's "sign out everywhere" must not disarm the victim's other
+//     devices), and is revocable only locally (Forget this device). Leak
+//     worst-case: targeted DoS of one account.
 const (
 	tokenPortal = "portal"
 	tokenSvc    = "svc"
+	tokenFreeze = "freeze"
 )
 
 // Token is the payload of a stateless HMAC-signed cookie.
@@ -36,9 +43,13 @@ type Token struct {
 	// refused once the lineage exceeds maxPortalLineage.
 	First  int64 `json:"f,omitempty"`
 	Expiry int64 `json:"e"`
+	// NoRenew marks a "public device" portal session: short-lived, never
+	// renewed, arms no freeze token, and caps its service cookies.
+	NoRenew bool `json:"nr,omitempty"`
 	// Epoch must equal the user's current session_epoch in users.json.
-	// Bumping that number (API-less: edit the file) is the panic button —
-	// it invalidates every outstanding cookie for the user at once.
+	// Bumping that number invalidates every outstanding portal/service
+	// cookie for the user at once. Freeze tokens carry no epoch — see
+	// tokenFreeze above.
 	Epoch int64 `json:"p"`
 }
 

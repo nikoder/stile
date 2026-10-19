@@ -29,6 +29,7 @@ func testApp(t *testing.T) (*App, http.Handler) {
 		SessionSecret:  []byte(strings.Repeat("s", 32)),
 		SessionTTL:     time.Hour,
 		SvcTTL:         10 * time.Minute,
+		FreezeTTL:      24 * time.Hour,
 		BootstrapToken: "sekrit-bootstrap",
 		DataDir:        t.TempDir(),
 		DisplayName:    "stile-test",
@@ -935,10 +936,258 @@ func TestRenewalLineageCap(t *testing.T) {
 func TestTicketRedirectPortalPortInsensitive(t *testing.T) {
 	app, _ := testApp(t)
 	target := "https://tap.example.com:443/x"
-	if got := app.ticketRedirect("nick", target); got != target {
+	if got := app.ticketRedirect("nick", target, time.Time{}); got != target {
 		t.Fatalf("portal target with explicit port got ticketed: %q", got)
 	}
-	if got := app.ticketRedirect("nick", "https://app.example.com/x"); !strings.Contains(got, ticketParam+"=") {
+	if got := app.ticketRedirect("nick", "https://app.example.com/x", time.Time{}); !strings.Contains(got, ticketParam+"=") {
 		t.Fatalf("app target not ticketed: %q", got)
+	}
+}
+
+// ---- emergency freeze --------------------------------------------------------
+
+func freezeCookie(t *testing.T, app *App, username string) *http.Cookie {
+	t.Helper()
+	raw, err := signToken(app.cfg.SessionSecret, Token{
+		Type: tokenFreeze, Username: username,
+		IssuedAt: time.Now().Unix(),
+		Expiry:   time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Cookie{Name: freezeCookieName, Value: raw}
+}
+
+func TestFreezeViaDeviceToken(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	svc := svcCookie(t, app, "nick", "app.example.com")
+
+	w := postAs(h, "/api/freeze", "https://tap.example.com",
+		[]*http.Cookie{freezeCookie(t, app, "nick")}, map[string]string{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("freeze: %d: %s", w.Code, w.Body)
+	}
+	rec := app.store.Get("nick")
+	if !rec.Disputed || rec.SessionEpoch != 1 {
+		t.Fatalf("not frozen: %+v", rec)
+	}
+
+	// Everything is sealed: service cookie, portal session, login begin.
+	r := fwdReq("/verify", "app.example.com", "/")
+	r.Header.Set("Accept", "application/json")
+	r.AddCookie(svc)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r)
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("service cookie survived freeze: %d", w2.Code)
+	}
+	frozen := postAs(h, "/api/login/begin", "https://tap.example.com", nil, map[string]string{"username": "nick"})
+	unknown := postAs(h, "/api/login/begin", "https://tap.example.com", nil, map[string]string{"username": "nobody"})
+	if frozen.Code != http.StatusBadRequest || frozen.Body.String() != unknown.Body.String() {
+		t.Fatalf("frozen login not uniform with unknown user: %d %q vs %q", frozen.Code, frozen.Body, unknown.Body)
+	}
+}
+
+// The freeze token must survive the attacker's "sign out everywhere".
+func TestFreezeTokenSurvivesEpochBump(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	app.store.BumpEpoch("nick") // attacker ran logout-all
+
+	fc := freezeCookie(t, app, "nick")
+	r := httptest.NewRequest("GET", "/api/freeze/status", nil)
+	r.AddCookie(fc)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var st struct{ Armed bool }
+	json.Unmarshal(w.Body.Bytes(), &st)
+	if !st.Armed {
+		t.Fatal("epoch bump disarmed the device")
+	}
+	w2 := postAs(h, "/api/freeze", "https://tap.example.com", []*http.Cookie{fc}, map[string]string{})
+	if w2.Code != http.StatusOK || !app.store.Get("nick").Disputed {
+		t.Fatal("freeze after epoch bump failed")
+	}
+}
+
+func TestFreezeUniformWithoutCredential(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	w := postAs(h, "/api/freeze", "https://tap.example.com", nil, map[string]string{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("want uniform 200, got %d", w.Code)
+	}
+	if app.store.Get("nick").Disputed {
+		t.Fatal("credential-less request froze an account")
+	}
+}
+
+func TestFreezeTokenIsDenyOnly(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	fc := freezeCookie(t, app, "nick")
+
+	// Not a session: keys listing refuses it even smuggled under the
+	// portal cookie name.
+	smuggled := &http.Cookie{Name: app.cfg.CookieName, Value: fc.Value}
+	r := httptest.NewRequest("GET", "/api/keys", nil)
+	r.AddCookie(smuggled)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("freeze token granted access: %d", w.Code)
+	}
+	// Not a service cookie either.
+	r2 := fwdReq("/verify", "app.example.com", "/")
+	r2.Header.Set("Accept", "application/json")
+	r2.AddCookie(&http.Cookie{Name: svcCookieName, Value: fc.Value})
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("freeze token passed /verify: %d", w2.Code)
+	}
+}
+
+func TestFreezeArmGates(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+
+	if w := postAs(h, "/api/freeze/arm", "https://tap.example.com", nil, map[string]string{}); w.Code != http.StatusUnauthorized {
+		t.Fatalf("arm without session: %d", w.Code)
+	}
+
+	// Public sessions never arm.
+	pub := func() *http.Cookie {
+		raw, _ := signToken(app.cfg.SessionSecret, Token{
+			Type: tokenPortal, Username: "nick", NoRenew: true,
+			IssuedAt: time.Now().Unix(), Expiry: time.Now().Add(time.Hour).Unix(),
+		})
+		return &http.Cookie{Name: app.cfg.CookieName, Value: raw}
+	}()
+	if w := postAs(h, "/api/freeze/arm", "https://tap.example.com", []*http.Cookie{pub}, map[string]string{}); w.Code != http.StatusBadRequest {
+		t.Fatalf("public session armed a device: %d", w.Code)
+	}
+
+	w := postAs(h, "/api/freeze/arm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "nick")}, map[string]string{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("arm: %d: %s", w.Code, w.Body)
+	}
+	var fc *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == freezeCookieName {
+			fc = c
+		}
+	}
+	if fc == nil || fc.Path != freezePath {
+		t.Fatalf("freeze cookie missing or not path-scoped: %+v", fc)
+	}
+	if tok, err := verifyToken(app.cfg.SessionSecret, tokenFreeze, fc.Value, time.Now()); err != nil || tok.Username != "nick" {
+		t.Fatalf("bad freeze token: %v %+v", err, tok)
+	}
+}
+
+func TestDisputeClear(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	addFakeUser(t, app, "victim")
+	app.cfg.AdminUsers = []string{"admin"}
+	app.store.Freeze("victim")
+
+	// Invites for a disputed account are refused.
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
+	if w := postAs(h, "/api/invite", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]string{"username": "victim", "action_token": action}); w.Code != http.StatusConflict {
+		t.Fatalf("invite minted for disputed account: %d", w.Code)
+	}
+	// Invite redemption for a disputed account is refused too.
+	code := app.codes.Put(codeEntry{Kind: "invite", Username: "victim"}, time.Minute)
+	if w := postAs(h, "/api/enroll/begin", "https://tap.example.com", nil,
+		map[string]string{"token": code, "username": "victim", "key_name": "k"}); w.Code != http.StatusForbidden {
+		t.Fatalf("disputed account enrolled: %d", w.Code)
+	}
+
+	// Clearing needs admin + the right op.
+	wrong := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
+	if w := postAs(h, "/api/dispute/clear", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]string{"username": "victim", "action_token": wrong}); w.Code != http.StatusForbidden {
+		t.Fatalf("cleared with wrong-op token: %d", w.Code)
+	}
+	right := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "clear-dispute"}, time.Minute)
+	if w := postAs(h, "/api/dispute/clear", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]string{"username": "victim", "action_token": right}); w.Code != http.StatusOK {
+		t.Fatalf("clear refused: %d: %s", w.Code, w.Body)
+	}
+	if app.store.Get("victim").Disputed {
+		t.Fatal("still disputed after clear")
+	}
+	// Login works again (epoch from the freeze keeps old cookies dead).
+	if w := postAs(h, "/api/login/begin", "https://tap.example.com", nil,
+		map[string]string{"username": "victim"}); w.Code != http.StatusOK {
+		t.Fatalf("login still blocked after clear: %d", w.Code)
+	}
+}
+
+func TestPublicSessionNoRenewAndCappedTickets(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+
+	// Public portal token inside the renewal window: must NOT renew.
+	raw, _ := signToken(app.cfg.SessionSecret, Token{
+		Type: tokenPortal, Username: "nick", NoRenew: true,
+		IssuedAt: time.Now().Unix(), First: time.Now().Unix(),
+		Expiry: time.Now().Add(time.Minute).Unix(),
+	})
+	pub := &http.Cookie{Name: app.cfg.CookieName, Value: raw}
+	r := httptest.NewRequest("GET", "/api/session", nil)
+	r.AddCookie(pub)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	for _, sc := range w.Result().Cookies() {
+		if sc.Name == app.cfg.CookieName && sc.Value != "" {
+			t.Fatal("public session renewed")
+		}
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["public"] != true {
+		t.Fatalf("session not reported public: %v", resp)
+	}
+
+	// Tickets minted under it cap the service cookie to the session expiry.
+	body, _ := json.Marshal(map[string]string{"rd": "https://app.example.com/x"})
+	r2 := httptest.NewRequest("POST", "/api/ticket", bytes.NewReader(body))
+	r2.Header.Set("Content-Type", "application/json")
+	r2.Header.Set("Origin", "https://tap.example.com")
+	r2.AddCookie(pub)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	var mint struct{ Redirect string }
+	json.Unmarshal(w2.Body.Bytes(), &mint)
+	u, _ := url.Parse(mint.Redirect)
+
+	r3 := fwdReq("/verify", "app.example.com", u.RequestURI())
+	w3 := httptest.NewRecorder()
+	h.ServeHTTP(w3, r3)
+	var sc *http.Cookie
+	for _, c := range w3.Result().Cookies() {
+		if c.Name == svcCookieName {
+			sc = c
+		}
+	}
+	if sc == nil {
+		t.Fatal("no service cookie on redemption")
+	}
+	tok, err := verifyToken(app.cfg.SessionSecret, tokenSvc, sc.Value, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Unix(tok.Expiry, 0).After(time.Now().Add(2 * time.Minute)) {
+		t.Fatalf("service cookie outlives the public session: expires %v", time.Unix(tok.Expiry, 0))
 	}
 }

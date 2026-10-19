@@ -16,7 +16,10 @@ type codeEntry struct {
 	Username string
 	Host     string // ticket only: the app host the ticket is bound to
 	Op       string // action only: the one operation the step-up tap authorizes
-	Expires  time.Time
+	// SvcCap (ticket only, zero = none) caps the minted service cookie's
+	// expiry — tickets from a public-device session must not outlive it.
+	SvcCap  time.Time
+	Expires time.Time
 }
 
 type codeStore struct {

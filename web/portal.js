@@ -63,17 +63,37 @@ async function loadKeys() {
   }
 }
 
+let freeze = { armed: false };
+
 async function init() {
   const qs = rd ? '?rd=' + encodeURIComponent(rd) : '';
   let state = { authenticated: false };
   try {
-    state = await (await fetch('/api/session' + qs)).json();
+    [state, freeze] = await Promise.all([
+      fetch('/api/session' + qs).then(r => r.json()),
+      fetch('/api/freeze/status').then(r => r.json()),
+    ]);
   } catch { /* fall through to the login form */ }
+
+  // The freeze button works with a device token OR a live session —
+  // visible whenever either exists.
+  if (freeze.armed || state.authenticated) {
+    $('freezeWho').textContent = freeze.armed ? '"' + freeze.username + '"' : '';
+    $('freezeBox').classList.remove('hidden');
+  }
 
   if (state.authenticated) {
     $('who').textContent = state.username;
     $('authed').classList.remove('hidden');
     if (state.admin) $('adminBox').classList.remove('hidden');
+    if (freeze.armed) {
+      $('armedRow').classList.remove('hidden');
+      // Slide the token's lifetime on any authenticated visit from a
+      // trusted (non-public) session.
+      if (!state.public) postJSON('/api/freeze/arm', {}).catch(() => {});
+    } else if (!state.public) {
+      $('armRow').classList.remove('hidden');
+    }
     if (state.redirect) {
       // Already signed in with a destination pending: fetch a one-time
       // ticket and bounce straight on.
@@ -90,6 +110,9 @@ async function init() {
     if (last) $('username').value = last;
     $('username').focus();
     if (state.bootstrap) $('enrollHint').classList.remove('hidden');
+    // One-time per-device trust decision: only asked when the device
+    // carries no freeze token, with no silent default.
+    if (!freeze.armed) $('trustChoice').classList.remove('hidden');
   }
 }
 
@@ -98,19 +121,74 @@ $('login').addEventListener('submit', async ev => {
   const button = $('go');
   const username = $('username').value.trim().toLowerCase();
   if (!username) return;
+  // On a token-less device the trust decision is mandatory and explicit.
+  let trust = 'returning';
+  if (!freeze.armed) {
+    const picked = document.querySelector('input[name="trust"]:checked');
+    if (!picked) {
+      showMsg($('msg'), 'Choose whether this is your own device first.', 'error');
+      return;
+    }
+    trust = picked.value;
+  }
+  const isPublic = trust === 'public';
   button.disabled = true;
   showMsg($('msg'), 'Tap your key…');
   try {
     const options = await postJSON('/api/login/begin', { username });
     const result = await assertKey(options);
-    const qs = rd ? '?rd=' + encodeURIComponent(rd) : '';
+    const params = new URLSearchParams();
+    if (rd) params.set('rd', rd);
+    if (isPublic) params.set('public', '1');
+    const qs = params.toString() ? '?' + params.toString() : '';
     const done = await sendResult('/api/login/finish' + qs, result);
-    localStorage.setItem('stile_username', username);
+    if (!isPublic) {
+      localStorage.setItem('stile_username', username);
+      if (trust === 'trust') await postJSON('/api/freeze/arm', {}).catch(() => {});
+    }
     showMsg($('msg'), 'Welcome!', 'ok');
     location.replace(done.redirect || '/');
   } catch (err) {
     showMsg($('msg'), err.message || String(err), 'error');
     button.disabled = false;
+  }
+});
+
+$('freezeBtn').addEventListener('click', async () => {
+  if (!confirm('Freeze this account?\n\nEvery session on every device and app ends immediately and sign-in is blocked until an admin clears the dispute. Do this if a key is lost or stolen.')) return;
+  try {
+    await postJSON('/api/freeze', {});
+    showMsg($('msg'), 'Account frozen. All sessions revoked; sign-in is blocked until an admin clears the dispute.', 'ok');
+  } catch (err) {
+    showMsg($('msg'), err.message || String(err), 'error');
+  }
+});
+
+$('forgetBtn').addEventListener('click', async () => {
+  if (!confirm('Remove the emergency freeze token from this device?\n\nThis device will no longer be able to freeze the account without signing in.')) return;
+  try { await postJSON('/api/freeze/forget', {}); } catch { /* best-effort */ }
+  location.reload();
+});
+
+$('armBtn').addEventListener('click', async () => {
+  try {
+    await postJSON('/api/freeze/arm', {});
+    location.reload();
+  } catch (err) {
+    showMsg($('msg'), err.message || String(err), 'error');
+  }
+});
+
+$('disputeForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const username = $('disputeUser').value.trim().toLowerCase();
+  if (!username) return;
+  try {
+    const action = await stepUp('clear-dispute');
+    await postJSON('/api/dispute/clear', { username, action_token: action });
+    showMsg($('msg'), 'Dispute cleared for "' + username + '" — they can sign in again.', 'ok');
+  } catch (err) {
+    showMsg($('msg'), err.message || String(err), 'error');
   }
 });
 

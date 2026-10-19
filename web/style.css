@@ -94,3 +94,19 @@ button.mini {
   border: 1px solid var(--border);
 }
 button.mini.danger { color: var(--error); }
+.choice {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+  margin: 0.6rem 0 0.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.choice label { font-size: 0.85rem; color: var(--text); display: flex; gap: 0.4rem; align-items: baseline; margin: 0; }
+.choice input[type="radio"] { width: auto; }
+button.danger-solid {
+  background: var(--error);
+  color: var(--card);
+  width: 100%;
+}
