@@ -40,7 +40,15 @@ type UserRecord struct {
 	// Disputed is the frozen state: no login, step-up, ticket redemption
 	// or invite works for the account until an admin clears it (or the
 	// flag is edited away in users.json).
-	Disputed    bool               `json:"disputed,omitempty"`
+	Disputed bool `json:"disputed,omitempty"`
+	// FreezeEpoch is embedded in the user's device freeze tokens at mint.
+	// Bumping it is the remediation for a LEAKED freeze token (year-long
+	// freeze-DoS otherwise): all the user's tokens die at once and their
+	// real devices re-arm at next login. Deliberately NOT bumpable from
+	// any ordinary session — only an admin step-up (for OTHER accounts)
+	// or a users.json edit (for one's own) — so a stolen session or even
+	// a stolen admin key cannot disarm the admin's own devices.
+	FreezeEpoch int64              `json:"freeze_epoch,omitempty"`
 	CreatedAt   time.Time          `json:"created_at"`
 	Credentials []StoredCredential `json:"credentials"`
 }
@@ -244,6 +252,21 @@ func (s *Store) ClearDispute(username string) error {
 	}
 	rec.Disputed = false
 	rec.SessionEpoch++
+	return s.saveLocked()
+}
+
+// DisarmFreezeTokens bumps the user's freeze epoch: every outstanding
+// device freeze token dies, remediating a leaked one. Real devices re-arm
+// at the next login tap.
+func (s *Store) DisarmFreezeTokens(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeReloadLocked()
+	rec, ok := s.data[username]
+	if !ok {
+		return fmt.Errorf("unknown user %q", username)
+	}
+	rec.FreezeEpoch++
 	return s.saveLocked()
 }
 

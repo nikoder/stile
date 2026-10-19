@@ -1264,3 +1264,75 @@ func TestEnrollFinishRefusesDisputed(t *testing.T) {
 		t.Fatalf("credential count changed on disputed account: %d", n)
 	}
 }
+
+// A bumped freeze epoch kills outstanding freeze tokens (leaked-token
+// remediation) without touching sessions.
+func TestFreezeEpochDisarm(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "nick")
+	fc := freezeCookie(t, app, "nick") // minted at freeze_epoch 0
+
+	if err := app.store.DisarmFreezeTokens("nick"); err != nil {
+		t.Fatal(err)
+	}
+	// Status: disarmed.
+	r := httptest.NewRequest("GET", "/api/freeze/status", nil)
+	r.AddCookie(fc)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var st struct{ Armed bool }
+	json.Unmarshal(w.Body.Bytes(), &st)
+	if st.Armed {
+		t.Fatal("stale freeze token still reports armed")
+	}
+	// Freeze attempt with the stale token: uniform response, no freeze.
+	w2 := postAs(h, "/api/freeze", "https://tap.example.com", []*http.Cookie{fc}, map[string]string{})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("want uniform 200, got %d", w2.Code)
+	}
+	if app.store.Get("nick").Disputed {
+		t.Fatal("stale freeze token froze the account")
+	}
+	// Sessions were untouched: session epoch still 0.
+	if app.store.Get("nick").SessionEpoch != 0 {
+		t.Fatal("disarm touched the session epoch")
+	}
+}
+
+func TestFreezeDisarmEndpointGates(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	addFakeUser(t, app, "victim")
+	app.cfg.AdminUsers = []string{"admin"}
+
+	// Non-admin refused.
+	act := app.codes.Put(codeEntry{Kind: "action", Username: "victim", Op: "disarm-freeze"}, time.Minute)
+	if w := postAs(h, "/api/freeze/disarm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "victim")},
+		map[string]string{"username": "victim", "action_token": act}); w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin disarmed: %d", w.Code)
+	}
+	// Admin without step-up refused.
+	if w := postAs(h, "/api/freeze/disarm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]string{"username": "victim", "action_token": "stale"}); w.Code != http.StatusForbidden {
+		t.Fatalf("disarm without step-up: %d", w.Code)
+	}
+	// Own account refused even for an admin with a fresh tap.
+	self := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "disarm-freeze"}, time.Minute)
+	if w := postAs(h, "/api/freeze/disarm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]string{"username": "admin", "action_token": self}); w.Code != http.StatusBadRequest {
+		t.Fatalf("self-disarm allowed in-protocol: %d", w.Code)
+	}
+	// Admin + tap + other account: works.
+	ok := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "disarm-freeze"}, time.Minute)
+	if w := postAs(h, "/api/freeze/disarm", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]string{"username": "victim", "action_token": ok}); w.Code != http.StatusOK {
+		t.Fatalf("disarm refused: %d: %s", w.Code, w.Body)
+	}
+	if app.store.Get("victim").FreezeEpoch != 1 {
+		t.Fatal("freeze epoch not bumped")
+	}
+}

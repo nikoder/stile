@@ -72,6 +72,15 @@
           <input id="disputeUser" placeholder="username" autocapitalize="none" spellcheck="false" required>
           <button type="submit" class="secondary">Unfreeze</button>
         </form>
+
+        <h2>Disarm freeze tokens (admin)</h2>
+        <form id="disarmForm" class="row">
+          <input id="disarmUser" placeholder="username" autocapitalize="none" spellcheck="false" required>
+          <button type="submit" class="secondary">Disarm</button>
+        </form>
+        <p class="hint">Kills every device freeze token for that account
+          (leaked-token remediation); their devices re-arm at next login.
+          Your own account's tokens can only be disarmed in users.json.</p>
       </div>
     </div>
 

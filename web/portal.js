@@ -176,6 +176,19 @@ $('forgetBtn').addEventListener('click', async () => {
   location.reload();
 });
 
+$('disarmForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const username = $('disarmUser').value.trim().toLowerCase();
+  if (!username) return;
+  try {
+    const action = await stepUp('disarm-freeze');
+    await postJSON('/api/freeze/disarm', { username, action_token: action });
+    showMsg($('msg'), 'All freeze tokens for "' + username + '" disarmed.', 'ok');
+  } catch (err) {
+    showMsg($('msg'), err.message || String(err), 'error');
+  }
+});
+
 $('disputeForm').addEventListener('submit', async ev => {
   ev.preventDefault();
   const username = $('disputeUser').value.trim().toLowerCase();

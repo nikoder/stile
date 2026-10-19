@@ -164,10 +164,16 @@ Who can pull the lever:
   account, never unlock anything, so it is long-lived
   (`STILE_FREEZE_TTL`, default a year, sliding with use) and
   **deliberately survives epoch bumps and "sign out everywhere"** — an
-  attacker's first move must not disarm your other devices. There is no
-  remote revocation by design; each device can locally *Forget* its own
-  token, and that is the only way one dies early (besides expiry, secret
-  rotation, or user deletion).
+  attacker's first move must not disarm your other devices. No ordinary
+  session can revoke one; each device can locally *Forget* its own token.
+- **Leaked freeze token remediation** (otherwise a stale cookie jar is a
+  year-long freeze-DoS on that account): every user has a `freeze_epoch`,
+  embedded in their tokens at mint and checked on use. An admin bumps it
+  for *another* user from the portal (step-up gated) — all that user's
+  tokens die, and their real devices re-arm at the next login tap. One's
+  **own** account can only be disarmed by editing `freeze_epoch` in
+  `users.json`: if it were reachable in-protocol, an attacker holding the
+  admin's key could pre-emptively disarm the admin's own devices.
 - Choosing **public or shared device** instead keeps nothing: no freeze
   token, no remembered username, a short (1 h) non-renewing session, and
   service cookies capped to it.

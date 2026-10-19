@@ -46,10 +46,11 @@ type Token struct {
 	// NoRenew marks a "public device" portal session: short-lived, never
 	// renewed, arms no freeze token, and caps its service cookies.
 	NoRenew bool `json:"nr,omitempty"`
-	// Epoch must equal the user's current session_epoch in users.json.
-	// Bumping that number invalidates every outstanding portal/service
-	// cookie for the user at once. Freeze tokens carry no epoch — see
-	// tokenFreeze above.
+	// Epoch pins the token to a counter in users.json: session_epoch for
+	// portal/service tokens (bump = revoke all sessions), freeze_epoch
+	// for freeze tokens (bump = disarm all devices; deliberately a
+	// SEPARATE counter so session revocation never touches freeze
+	// tokens — see tokenFreeze above).
 	Epoch int64 `json:"p"`
 }
 

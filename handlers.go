@@ -53,7 +53,7 @@ const (
 
 // stepUpOps are the operations a step-up tap can authorize; the client
 // declares one up front and the minted action token spends only on it.
-var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true, "clear-dispute": true}
+var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true, "clear-dispute": true, "disarm-freeze": true}
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9._-]{1,32}$`)
 
@@ -88,6 +88,7 @@ func (a *App) Routes(static fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/freeze/status", a.handleFreezeStatus)
 	mux.HandleFunc("POST /api/freeze/arm", a.handleFreezeArm)
 	mux.HandleFunc("POST /api/freeze/forget", a.handleFreezeForget)
+	mux.HandleFunc("POST /api/freeze/disarm", a.handleFreezeDisarm)
 	mux.HandleFunc("POST /api/dispute/clear", a.handleDisputeClear)
 
 	return securityHeaders(mux)
@@ -459,7 +460,7 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 	// session — a transiently stolen session must not arm the thief's
 	// device with an irrevocable freeze loop.
 	if !public && r.URL.Query().Get("trust") == "1" {
-		if err := a.setFreezeCookie(w, rec.Username); err != nil {
+		if err := a.setFreezeCookie(w, rec.Username, rec.FreezeEpoch); err != nil {
 			log.Printf("arm freeze token for %s: %v", rec.Username, err)
 		} else {
 			log.Printf("device armed for %s at login (ip %s)", rec.Username, clientIP(r))
@@ -934,6 +935,9 @@ func (a *App) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 // server-side registry and carry no epoch, so there is deliberately NO
 // remote way to disarm the victim's devices.
 
+// freezeTokenUser validates the device's freeze token: signature, expiry
+// AND the user's current freeze epoch — a bumped epoch (the leaked-token
+// remediation) makes every older token dead on arrival.
 func (a *App) freezeTokenUser(r *http.Request) string {
 	c, err := r.Cookie(freezeCookieName)
 	if err != nil {
@@ -941,6 +945,10 @@ func (a *App) freezeTokenUser(r *http.Request) string {
 	}
 	tok, err := verifyToken(a.cfg.SessionSecret, tokenFreeze, c.Value, time.Now())
 	if err != nil {
+		return ""
+	}
+	rec := a.store.Get(tok.Username)
+	if rec == nil || tok.Epoch != rec.FreezeEpoch {
 		return ""
 	}
 	return tok.Username
@@ -986,11 +994,13 @@ func (a *App) handleFreezeStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"armed": false})
 }
 
-func (a *App) setFreezeCookie(w http.ResponseWriter, username string) error {
+// setFreezeCookie mints the device freeze token; Epoch carries the user's
+// freeze epoch (NOT the session epoch — freeze tokens survive those bumps).
+func (a *App) setFreezeCookie(w http.ResponseWriter, username string, freezeEpoch int64) error {
 	exp := time.Now().Add(a.cfg.FreezeTTL)
 	raw, err := signToken(a.cfg.SessionSecret, Token{
 		Type: tokenFreeze, Username: username,
-		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(),
+		IssuedAt: time.Now().Unix(), Expiry: exp.Unix(), Epoch: freezeEpoch,
 	})
 	if err != nil {
 		return err
@@ -1017,7 +1027,7 @@ func (a *App) handleFreezeArm(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bad origin", http.StatusForbidden)
 		return
 	}
-	tok, _, ok := a.checkPortalSession(r)
+	tok, rec, ok := a.checkPortalSession(r)
 	if !ok {
 		jsonError(w, "not signed in", http.StatusUnauthorized)
 		return
@@ -1030,11 +1040,60 @@ func (a *App) handleFreezeArm(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "arming happens at sign-in via the device-trust choice", http.StatusForbidden)
 		return
 	}
-	if err := a.setFreezeCookie(w, tok.Username); err != nil {
+	if err := a.setFreezeCookie(w, tok.Username, rec.FreezeEpoch); err != nil {
 		jsonError(w, "failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "armed"})
+}
+
+// handleFreezeDisarm is the leaked-freeze-token remediation: admin +
+// fresh tap bumps the target's freeze epoch, killing every outstanding
+// freeze token for that account (real devices re-arm at next login).
+// Deliberately refused for the caller's OWN account: otherwise an
+// attacker holding the admin's key could pre-emptively disarm the
+// admin's devices before striking. Self-disarm lives in users.json
+// (freeze_epoch), behind host access.
+func (a *App) handleFreezeDisarm(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	tok, rec, ok := a.checkPortalSession(r)
+	if !ok {
+		jsonError(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	if !a.isAdmin(rec) {
+		jsonError(w, "admin only", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Username    string `json:"username"`
+		ActionToken string `json:"action_token"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if !a.consumeAction(tok.Username, req.ActionToken, "disarm-freeze") {
+		jsonError(w, "step-up required", http.StatusForbidden)
+		return
+	}
+	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
+	if !usernameRe.MatchString(req.Username) {
+		jsonError(w, "username must match [a-z0-9._-]{1,32}", http.StatusBadRequest)
+		return
+	}
+	if req.Username == tok.Username {
+		jsonError(w, "own-account disarm is a users.json edit (freeze_epoch) — see README", http.StatusBadRequest)
+		return
+	}
+	if err := a.store.DisarmFreezeTokens(req.Username); err != nil {
+		jsonError(w, "disarm failed", http.StatusBadRequest)
+		return
+	}
+	log.Printf("freeze tokens disarmed for %q by %s (ip %s)", req.Username, tok.Username, clientIP(r))
+	writeJSON(w, map[string]string{"status": "disarmed"})
 }
 
 // handleFreezeForget clears THIS device's freeze token. Local-only by
