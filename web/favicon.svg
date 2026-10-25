@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- A stile: steps up, over, and down, crossing the fence rails that
+       run behind them — the legitimate way over the fence. -->
+  <style>
+    .rail { stroke: #6b6b6b; }
+    .step { stroke: #1a1a1a; }
+    @media (prefers-color-scheme: dark) {
+      .rail { stroke: #9a9892; }
+      .step { stroke: #e8e6e3; }
+    }
+  </style>
+  <g fill="none" stroke-linecap="square">
+    <path class="rail" stroke-width="2" d="M1 17 H31 M1 23 H31"/>
+    <path class="step" stroke-width="3" d="M2 28 H7 V19 H12 V10 H20 V19 H25 V28 H30"/>
+  </g>
+</svg>
