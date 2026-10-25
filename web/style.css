@@ -50,6 +50,7 @@ h1 {
   gap: 0.5rem;
 }
 h1 .key { font-size: 1.5rem; }
+h1 img.key { width: 1.4em; height: 1.4em; }
 p.hint { margin: 0; color: var(--muted); font-size: 0.85rem; }
 label { font-size: 0.85rem; color: var(--muted); display: block; margin-bottom: 0.25rem; }
 input {
