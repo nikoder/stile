@@ -5,16 +5,19 @@ const rd = new URLSearchParams(location.search).get('rd') || '';
 
 // A fresh tap of an enrolled key, unlocking exactly one operation of the
 // declared kind.
-async function stepUp(op) {
-  showMsg($('msg'), 'Tap your key to confirm…');
+async function stepUp(op, msg) {
+  showMsg($('msg'), msg || 'Tap your key to confirm…');
   const options = await postJSON('/api/stepup/begin', { op });
   const result = await assertKey(options);
   const done = await sendResult('/api/stepup/finish', result);
   return done.action_token;
 }
 
+let keyNames = [];
+
 async function loadKeys() {
   const { keys } = await (await fetch('/api/keys')).json();
+  keyNames = keys.map(k => k.name);
   const ul = $('keys');
   ul.textContent = '';
   const lastKey = keys.length === 1;
@@ -293,11 +296,27 @@ $('disputeForm').addEventListener('submit', async ev => {
 });
 
 $('addKey').addEventListener('click', async () => {
-  const name = prompt('Name for the new key:');
+  const name = prompt('Name for the NEW key:');
   if (!name) return;
+  // The browser's own WebAuthn sheet can't be relabeled, and presenting
+  // the new key during step-up earns an opaque "key not recognized"
+  // from the authenticator layer — so set expectations BEFORE any sheet
+  // appears, naming the keys that step 1 will actually accept.
+  const existing = keyNames.length ? '"' + keyNames.join('", "') + '"' : 'an already-enrolled key';
+  if (!confirm('Adding a key takes TWO taps:\n\n'
+      + 'Step 1 — AUTHORIZE: tap a key that is ALREADY enrolled (' + existing + ').\n'
+      + 'Step 2 — ENROLL: when prompted again, tap the NEW key.\n\n'
+      + 'Ready? The next tap is Step 1 — the EXISTING key, not the new one.')) return;
+  let action;
   try {
-    const action = await stepUp('add-key');
-    showMsg($('msg'), 'Now tap the NEW key…');
+    action = await stepUp('add-key', 'Step 1 of 2: tap your EXISTING key (' + existing + ')…');
+  } catch (err) {
+    showMsg($('msg'), (err.message || String(err))
+      + ' — Step 1 needs a key that is already enrolled; the NEW key only comes in Step 2.', 'error');
+    return;
+  }
+  try {
+    showMsg($('msg'), 'Step 2 of 2: now insert & tap the NEW key…');
     const options = await postJSON('/api/keys/add/begin', { action_token: action, key_name: name });
     const result = await createKey(options);
     await sendResult('/api/enroll/finish', result);
