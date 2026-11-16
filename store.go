@@ -159,6 +159,11 @@ func (s *Store) AddCredential(username string, userID []byte, name string, cred 
 		s.data[username] = rec
 	} else if !bytes.Equal(rec.ID, userID) {
 		return fmt.Errorf("user handle mismatch for %q", username)
+	} else if len(hosts) > 0 {
+		// Belt for the invite-hosts TOCTOU: silently ignoring an initial
+		// allowlist because the record appeared mid-ceremony would leave
+		// the account wider than the admin intended.
+		return fmt.Errorf("initial hosts are create-only and %q already exists", username)
 	}
 	rec.Credentials = append(rec.Credentials, StoredCredential{
 		Name:       name,

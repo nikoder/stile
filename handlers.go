@@ -180,7 +180,7 @@ func (a *App) redeemTicket(w http.ResponseWriter, r *http.Request, fwdHost strin
 		return false
 	}
 	e, ok := a.codes.Take("ticket", code)
-	if !ok || e.Host != fwdHost {
+	if !ok || e.Host != canonHost(fwdHost) {
 		// Stale, replayed or cross-host ticket: fall through — the portal
 		// bounce will mint a fresh one if the browser holds a session.
 		log.Printf("refused ticket on %s (ip %s)", fwdHost, clientIP(r))
@@ -190,7 +190,7 @@ func (a *App) redeemTicket(w http.ResponseWriter, r *http.Request, fwdHost strin
 	if rec == nil || len(rec.Credentials) == 0 || rec.Disputed || !rec.MayAccess(fwdHost) {
 		return false
 	}
-	a.setServiceCookie(w, e.Username, fwdHost, rec.SessionEpoch, e.SvcCap)
+	a.setServiceCookie(w, e.Username, canonHost(fwdHost), rec.SessionEpoch, e.SvcCap)
 	q.Del(ticketParam)
 	u.RawQuery = q.Encode()
 	http.Redirect(w, r, fwdProto(r)+"://"+fwdHost+u.String(), http.StatusFound)
@@ -204,7 +204,7 @@ func (a *App) checkServiceToken(r *http.Request, fwdHost string) (Token, bool) {
 		return Token{}, false
 	}
 	tok, err := verifyToken(a.cfg.SessionSecret, tokenSvc, c.Value, time.Now())
-	if err != nil || tok.Host == "" || tok.Host != fwdHost {
+	if err != nil || tok.Host == "" || tok.Host != canonHost(fwdHost) {
 		return Token{}, false
 	}
 	rec := a.store.Get(tok.Username)
@@ -365,7 +365,7 @@ func (a *App) authorizedTarget(rec *UserRecord, target string) bool {
 	if err != nil {
 		return false
 	}
-	if strings.EqualFold(u.Hostname(), a.cfg.PortalURL.Hostname()) {
+	if canonHost(u.Hostname()) == canonHost(a.cfg.PortalURL.Hostname()) {
 		return true
 	}
 	return rec.MayAccess(u.Host)
@@ -388,10 +388,13 @@ func (a *App) ticketRedirect(username, target string, svcCap time.Time) string {
 	// Hostname comparison on purpose: an explicit default port in the rd
 	// (tap.example.com:443) must not slip past the portal exclusion and
 	// mint an unredeemable port-suffixed ticket.
-	if err != nil || strings.EqualFold(u.Hostname(), a.cfg.PortalURL.Hostname()) {
+	if err != nil || canonHost(u.Hostname()) == canonHost(a.cfg.PortalURL.Hostname()) {
 		return target
 	}
-	code := a.codes.Put(codeEntry{Kind: "ticket", Username: username, Host: u.Host, SvcCap: svcCap}, ticketTTL)
+	// The ticket binds the CANONICAL host: an rd carrying :443 must mint
+	// a ticket redeemable against the portless X-Forwarded-Host (raw
+	// binding caused a fail-closed self-bounce loop for such clients).
+	code := a.codes.Put(codeEntry{Kind: "ticket", Username: username, Host: canonHost(u.Host), SvcCap: svcCap}, ticketTTL)
 	q := u.Query()
 	q.Set(ticketParam, code)
 	u.RawQuery = q.Encode()
@@ -789,7 +792,15 @@ func (a *App) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Scope a brand-new account before its first ticket: hosts carried
-		// by the invite apply only at record creation.
+		// by the invite apply only at record creation. The mint-side 400
+		// has a TOCTOU window (another invite can create the record while
+		// this one is outstanding) — re-check here so the hosts are never
+		// silently dropped against admin intent.
+		if len(e.Hosts) > 0 && a.store.Get(req.Username) != nil {
+			log.Printf("enrollment refused for %q: hosts-carrying invite but account now exists (ip %s)", req.Username, clientIP(r))
+			jsonError(w, "this invite carried an initial allowlist but the account already exists — ask your admin for a fresh invite", http.StatusForbidden)
+			return
+		}
 		initialHosts = e.Hosts
 	}
 
@@ -1010,11 +1021,19 @@ func (a *App) handleSetHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Username    string   `json:"username"`
-		Hosts       []string `json:"hosts"`
-		ActionToken string   `json:"action_token"`
+		Username string `json:"username"`
+		// Pointer on purpose: an ABSENT field must not read as "clear to
+		// all hosts" — only an explicit [] means that. Checked before the
+		// step-up token is consumed, so a malformed request doesn't burn
+		// the tap.
+		Hosts       *[]string `json:"hosts"`
+		ActionToken string    `json:"action_token"`
 	}
 	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Hosts == nil {
+		jsonError(w, "hosts field required — send an explicit [] to mean all hosts", http.StatusBadRequest)
 		return
 	}
 	if !a.consumeAction(tok.Username, req.ActionToken, "set-hosts") {
@@ -1026,7 +1045,7 @@ func (a *App) handleSetHosts(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "username must match [a-z0-9._-]{1,32}", http.StatusBadRequest)
 		return
 	}
-	hosts, err := normalizeHosts(req.Hosts)
+	hosts, err := normalizeHosts(*req.Hosts)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return

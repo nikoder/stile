@@ -1530,9 +1530,11 @@ func TestInviteCarriesHosts(t *testing.T) {
 	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 1 {
 		t.Fatalf("hosts not applied on create: %v", got)
 	}
-	app.store.AddCredential("zhansi", []byte("h-z"), "k2", webauthn.Credential{ID: []byte("z2")}, false, []string{"evil.example.com"})
+	if err := app.store.AddCredential("zhansi", []byte("h-z"), "k2", webauthn.Credential{ID: []byte("z2")}, false, []string{"evil.example.com"}); err == nil {
+		t.Fatal("hosts-carrying AddCredential on an existing record must error, not silently ignore")
+	}
 	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 1 || got[0] != "app.example.com" {
-		t.Fatalf("second credential overwrote hosts: %v", got)
+		t.Fatalf("hosts changed despite refusal: %v", got)
 	}
 }
 
@@ -1664,5 +1666,91 @@ func TestCanonHostSingleStrip(t *testing.T) {
 	}
 	if got := canonHost("app.example.com:8443"); got != "app.example.com:8443" {
 		t.Fatalf("non-default port stripped: %q", got)
+	}
+}
+
+// F1 (round 2): a hosts-carrying invite whose account came into existence
+// between mint and redemption must refuse, not silently drop the hosts.
+func TestInviteHostsTOCTOURefused(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	app.cfg.AdminUsers = []string{"admin"}
+
+	code := app.codes.Put(codeEntry{Kind: "invite", Username: "zhansi", Hosts: []string{"app.example.com"}}, time.Minute)
+	// The record appears after mint (a second, no-hosts invite redeemed first).
+	addFakeUser(t, app, "zhansi")
+
+	w := postAs(h, "/api/enroll/begin", "https://tap.example.com", nil,
+		map[string]string{"token": code, "username": "zhansi", "key_name": "k"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("TOCTOU hosts-drop not refused: %d: %s", w.Code, w.Body)
+	}
+	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 0 {
+		t.Fatalf("hosts applied despite refusal: %v", got)
+	}
+}
+
+// F2 (round 2): an ABSENT hosts field is not "clear to all hosts".
+func TestSetHostsAbsentFieldRefused(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	addFakeUser(t, app, "zhansi")
+	app.cfg.AdminUsers = []string{"admin"}
+	app.store.SetAllowedHosts("zhansi", []string{"app.example.com"})
+
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "set-hosts"}, time.Minute)
+	w := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "action_token": action})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("absent hosts field widened to all: %d", w.Code)
+	}
+	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 1 {
+		t.Fatalf("allowlist changed: %v", got)
+	}
+	// The malformed request must not have burnt the step-up tap.
+	w2 := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{"other.example.com"}, "action_token": action})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("tap was burnt by the malformed request: %d: %s", w2.Code, w2.Body)
+	}
+}
+
+// Footnote (round 2): an rd carrying :443 mints a CANONICAL ticket that
+// redeems against the portless X-Forwarded-Host — no self-bounce loop.
+func TestTicketPortFormRoundTrip(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "ada")
+
+	body, _ := json.Marshal(map[string]string{"rd": "https://app.example.com:443/dash"})
+	r := httptest.NewRequest("POST", "/api/ticket", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Origin", "https://tap.example.com")
+	r.AddCookie(portalCookie(t, app, "ada"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("mint: %d: %s", w.Code, w.Body)
+	}
+	var mint struct{ Redirect string }
+	json.Unmarshal(w.Body.Bytes(), &mint)
+	u, _ := url.Parse(mint.Redirect)
+
+	r2 := fwdReq("/verify", "app.example.com", u.RequestURI())
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusFound {
+		t.Fatalf("port-form ticket did not redeem portless: %d", w2.Code)
+	}
+	var sc *http.Cookie
+	for _, c := range w2.Result().Cookies() {
+		if c.Name == svcCookieName {
+			sc = c
+		}
+	}
+	tok, err := verifyToken(app.cfg.SessionSecret, tokenSvc, sc.Value, time.Now())
+	if err != nil || tok.Host != "app.example.com" {
+		t.Fatalf("svc cookie not canonical: %v %+v", err, tok)
 	}
 }
