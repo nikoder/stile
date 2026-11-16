@@ -923,6 +923,14 @@ func (a *App) handleInvite(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Invite-carried hosts apply only at record CREATION; accepting them
+	// for an existing account would silently discard them (the old list —
+	// possibly "all hosts" — survives), which is admin-intent widening.
+	// Refuse the ambiguity: existing users are scoped in the users panel.
+	if len(hosts) > 0 && a.store.Get(req.Username) != nil {
+		jsonError(w, "user already exists — set allowed hosts in the users panel instead", http.StatusBadRequest)
+		return
+	}
 	code := a.codes.Put(codeEntry{Kind: "invite", Username: req.Username, Hosts: hosts}, inviteTTL)
 	link := a.cfg.PortalURL.String() + "/enroll?invite=" + url.QueryEscape(code) +
 		"&username=" + url.QueryEscape(req.Username)
@@ -930,12 +938,16 @@ func (a *App) handleInvite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"code": code, "link": link, "expires_in_minutes": int(inviteTTL.Minutes())})
 }
 
-// normalizeHosts lowercases, trims, de-dupes and validates an allowlist.
+// normalizeHosts canonicalizes, de-dupes and validates an allowlist. A
+// request that contained entries but normalized to NOTHING is refused:
+// silently turning a malformed narrowing request into the widest grant
+// (empty = all hosts) is exactly the failure this feature exists to
+// prevent. An explicitly empty list remains the documented clear-to-all.
 func normalizeHosts(in []string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	for _, h := range in {
-		h = strings.ToLower(strings.TrimSpace(h))
+		h = canonHost(h)
 		if h == "" || seen[h] {
 			continue
 		}
@@ -944,6 +956,9 @@ func normalizeHosts(in []string) ([]string, error) {
 		}
 		seen[h] = true
 		out = append(out, h)
+	}
+	if len(in) > 0 && len(out) == 0 {
+		return nil, fmt.Errorf("no valid hosts in request; send an empty list to mean all hosts")
 	}
 	return out, nil
 }

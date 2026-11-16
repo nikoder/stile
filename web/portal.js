@@ -134,7 +134,11 @@ async function init() {
         const t = await postJSON('/api/ticket', { rd: state.redirect });
         location.replace(t.redirect);
         return;
-      } catch { /* stay on the portal, show the manage view */ }
+      } catch (err) {
+        // Stay on the manage view, but say WHY (e.g. "not authorized for
+        // this service" after being de-listed) instead of a silent land.
+        showMsg($('msg'), (err.message || String(err)) + ' (' + state.redirect + ')', 'error');
+      }
     }
     loadKeys().catch(() => {});
   } else {

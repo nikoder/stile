@@ -51,7 +51,9 @@ The list is enforced in three places: ticket minting (the portal refuses
 to mint for a de-listed host), ticket redemption, and every service
 cookie check — so **editing a user's allowlist revokes their existing
 sessions on de-listed hosts at the next request**, the same live-policy
-philosophy as epoch bumps. An unauthorized post-login redirect falls back
+philosophy as epoch bumps. One inherent limit: an app that converts the
+forwarded identity into its *own* session keeps that session until it
+expires app-side — fence-level revocation can't reach it. An unauthorized post-login redirect falls back
 to the portal rather than blocking the login.
 
 Admins manage allowlists from the portal (step-up gated, like every

@@ -131,6 +131,9 @@ func (s *Store) Get(username string) *UserRecord {
 	}
 	cp := *rec
 	cp.Credentials = append([]StoredCredential(nil), rec.Credentials...)
+	// Deep-copied so no caller shares the live backing array — the first
+	// future in-place mutation would otherwise be a cross-request race.
+	cp.AllowedHosts = append([]string(nil), rec.AllowedHosts...)
 	return &cp
 }
 
@@ -229,13 +232,27 @@ func (s *Store) DeleteCredential(username string, credID []byte) error {
 	return fmt.Errorf("unknown credential for %q", username)
 }
 
+// canonHost canonicalizes a hostname for allowlist comparison: lowercase
+// (plain ToLower + ==, NOT EqualFold — full Unicode folding would make
+// this code's safety rest on the reverse proxy never routing a
+// Unicode-Host request here) and default ports stripped, so a
+// non-browser client sending "app.example.com:443" matches the entry
+// "app.example.com". Non-default ports stay significant.
+func canonHost(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	h = strings.TrimSuffix(h, ":443")
+	h = strings.TrimSuffix(h, ":80")
+	return h
+}
+
 // MayAccess reports whether the user is authorized for an app host.
 func (r *UserRecord) MayAccess(host string) bool {
 	if len(r.AllowedHosts) == 0 {
 		return true
 	}
+	host = canonHost(host)
 	for _, h := range r.AllowedHosts {
-		if strings.EqualFold(h, host) {
+		if canonHost(h) == host {
 			return true
 		}
 	}

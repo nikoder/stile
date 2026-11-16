@@ -1590,3 +1590,62 @@ func TestUsersAndSetHostsGates(t *testing.T) {
 		t.Fatalf("invalid hostname accepted: %d", w.Code)
 	}
 }
+
+// ---- v0.2 review round fixes ---------------------------------------------------
+
+func TestNormalizeHostsRefusesAllInvalid(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	addFakeUser(t, app, "zhansi")
+	app.cfg.AdminUsers = []string{"admin"}
+
+	// Only-empty entries must NOT silently widen to all-hosts.
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "set-hosts"}, time.Minute)
+	w := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{" ", ""}, "action_token": action})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("only-empty hosts widened silently: %d", w.Code)
+	}
+}
+
+func TestInviteHostsRefusedForExistingUser(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	addFakeUser(t, app, "zhansi")
+	app.cfg.AdminUsers = []string{"admin"}
+
+	// With hosts, for an existing record: refused (would be silently dropped).
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
+	w := postAs(h, "/api/invite", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{"app.example.com"}, "action_token": action})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("hosts-carrying re-invite accepted: %d", w.Code)
+	}
+	// Without hosts: fine (the normal re-key path).
+	action2 := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
+	w2 := postAs(h, "/api/invite", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "action_token": action2})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("plain re-invite refused: %d: %s", w2.Code, w2.Body)
+	}
+}
+
+func TestMayAccessPortForms(t *testing.T) {
+	r := &UserRecord{AllowedHosts: []string{"app.example.com"}}
+	if !r.MayAccess("app.example.com:443") {
+		t.Fatal("default https port form refused")
+	}
+	if !r.MayAccess("app.example.com:80") {
+		t.Fatal("default http port form refused")
+	}
+	if r.MayAccess("app.example.com:8443") {
+		t.Fatal("non-default port widened")
+	}
+	r2 := &UserRecord{AllowedHosts: []string{"app.example.com:443"}}
+	if !r2.MayAccess("app.example.com") {
+		t.Fatal("port-suffixed entry refused portless host")
+	}
+}
