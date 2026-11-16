@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -240,8 +241,12 @@ func (s *Store) DeleteCredential(username string, credID []byte) error {
 // "app.example.com". Non-default ports stay significant.
 func canonHost(h string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
-	h = strings.TrimSuffix(h, ":443")
-	h = strings.TrimSuffix(h, ":80")
+	// SplitHostPort rather than suffix-trims: exactly ONE port is
+	// considered, so a malformed "host:80:443" cannot double-strip its
+	// way to a clean hostname.
+	if host, port, err := net.SplitHostPort(h); err == nil && (port == "443" || port == "80") {
+		return host
+	}
 	return h
 }
 

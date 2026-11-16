@@ -1649,3 +1649,17 @@ func TestMayAccessPortForms(t *testing.T) {
 		t.Fatal("port-suffixed entry refused portless host")
 	}
 }
+
+// canonHost considers exactly one port: a malformed double-port form
+// must not strip its way down to a clean (matchable) hostname.
+func TestCanonHostSingleStrip(t *testing.T) {
+	if got := canonHost("app.example.com:80:443"); got != "app.example.com:80" {
+		t.Fatalf("double-port form canonicalized to %q", got)
+	}
+	if got := canonHost("APP.example.com:443 "); got != "app.example.com" {
+		t.Fatalf("default port not stripped: %q", got)
+	}
+	if got := canonHost("app.example.com:8443"); got != "app.example.com:8443" {
+		t.Fatalf("non-default port stripped: %q", got)
+	}
+}
