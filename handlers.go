@@ -145,7 +145,7 @@ func (a *App) handleVerify(w http.ResponseWriter, r *http.Request) {
 	// X-Forwarded-Method is set by Caddy's forward_auth and additionally
 	// stripped from client requests on the portal route.
 	isFwd := r.Header.Get("X-Forwarded-Method") != "" && fwdHost != "" &&
-		!strings.EqualFold(requestHostname(r), a.cfg.PortalURL.Hostname())
+		canonHost(requestHostname(r)) != canonHost(a.cfg.PortalURL.Hostname())
 
 	if isFwd {
 		if a.redeemTicket(w, r, fwdHost) {
