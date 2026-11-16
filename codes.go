@@ -16,6 +16,9 @@ type codeEntry struct {
 	Username string
 	Host     string // ticket only: the app host the ticket is bound to
 	Op       string // action only: the one operation the step-up tap authorizes
+	// Hosts (invite only): initial allowed_hosts for the account the
+	// invite creates — scopes a new user before their first ticket.
+	Hosts []string
 	// SvcCap (ticket only, zero = none) caps the minted service cookie's
 	// expiry — tickets from a public-device session must not outlive it.
 	SvcCap  time.Time

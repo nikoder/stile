@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +43,11 @@ type UserRecord struct {
 	// or invite works for the account until an admin clears it (or the
 	// flag is edited away in users.json).
 	Disputed bool `json:"disputed,omitempty"`
+	// AllowedHosts, when non-empty, is the only set of app hostnames this
+	// user's tickets and service cookies work for (case-insensitive exact
+	// match against X-Forwarded-Host). Empty/absent = every gated host —
+	// back-compat, and the right default for single-operator deployments.
+	AllowedHosts []string `json:"allowed_hosts,omitempty"`
 	// FreezeEpoch is embedded in the user's device freeze tokens at mint.
 	// Bumping it is the remediation for a LEAKED freeze token (year-long
 	// freeze-DoS otherwise): all the user's tokens die at once and their
@@ -136,14 +143,15 @@ func (s *Store) UserCount() int {
 
 // AddCredential creates the user record on first enrollment. userID is the
 // handle the registration ceremony ran with; for an existing user it must
-// match the stored handle. admin is only applied when creating the record.
-func (s *Store) AddCredential(username string, userID []byte, name string, cred webauthn.Credential, admin bool) error {
+// match the stored handle. admin and hosts are only applied when creating
+// the record (invites may carry an initial host allowlist).
+func (s *Store) AddCredential(username string, userID []byte, name string, cred webauthn.Credential, admin bool, hosts []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.maybeReloadLocked()
 	rec, ok := s.data[username]
 	if !ok {
-		rec = &UserRecord{ID: userID, Username: username, Admin: admin, CreatedAt: time.Now().UTC()}
+		rec = &UserRecord{ID: userID, Username: username, Admin: admin, AllowedHosts: hosts, CreatedAt: time.Now().UTC()}
 		s.data[username] = rec
 	} else if !bytes.Equal(rec.ID, userID) {
 		return fmt.Errorf("user handle mismatch for %q", username)
@@ -219,6 +227,53 @@ func (s *Store) DeleteCredential(username string, credID []byte) error {
 		}
 	}
 	return fmt.Errorf("unknown credential for %q", username)
+}
+
+// MayAccess reports whether the user is authorized for an app host.
+func (r *UserRecord) MayAccess(host string) bool {
+	if len(r.AllowedHosts) == 0 {
+		return true
+	}
+	for _, h := range r.AllowedHosts {
+		if strings.EqualFold(h, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetAllowedHosts replaces the user's host allowlist (nil/empty = all).
+func (s *Store) SetAllowedHosts(username string, hosts []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeReloadLocked()
+	rec, ok := s.data[username]
+	if !ok {
+		return fmt.Errorf("unknown user %q", username)
+	}
+	rec.AllowedHosts = hosts
+	return s.saveLocked()
+}
+
+// Users returns copies of every record, sorted by username.
+func (s *Store) Users() []*UserRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maybeReloadLocked()
+	names := make([]string, 0, len(s.data))
+	for n := range s.data {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]*UserRecord, 0, len(names))
+	for _, n := range names {
+		rec := s.data[n]
+		cp := *rec
+		cp.Credentials = append([]StoredCredential(nil), rec.Credentials...)
+		cp.AllowedHosts = append([]string(nil), rec.AllowedHosts...)
+		out = append(out, &cp)
+	}
+	return out
 }
 
 // Freeze puts the account in the disputed state and revokes everything

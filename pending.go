@@ -15,10 +15,11 @@ import (
 type pendingCeremony struct {
 	Kind     string // "login" or "register"
 	Username string
-	UserID   []byte // registration only: handle the ceremony ran with
-	CredName string // registration only
-	Admin    bool   // registration only: bootstrap user becomes admin
-	Op       string // stepup only: the one operation the tap authorizes
+	UserID   []byte   // registration only: handle the ceremony ran with
+	CredName string   // registration only
+	Admin    bool     // registration only: bootstrap user becomes admin
+	Hosts    []string // registration only: initial allowed_hosts for a new record
+	Op       string   // stepup only: the one operation the tap authorizes
 	Session  webauthn.SessionData
 	Expires  time.Time
 }

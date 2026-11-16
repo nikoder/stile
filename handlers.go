@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -55,9 +56,13 @@ const (
 
 // stepUpOps are the operations a step-up tap can authorize; the client
 // declares one up front and the minted action token spends only on it.
-var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true, "clear-dispute": true, "disarm-freeze": true}
+var stepUpOps = map[string]bool{"delete-key": true, "add-key": true, "invite": true, "clear-dispute": true, "disarm-freeze": true, "set-hosts": true}
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9._-]{1,32}$`)
+
+// hostRe accepts the hostnames admins may put in allowlists — matched
+// verbatim (lowercased) against X-Forwarded-Host.
+var hostRe = regexp.MustCompile(`^[a-z0-9.-]{1,253}(:[0-9]{1,5})?$`)
 
 func (a *App) Routes(static fs.FS) http.Handler {
 	mux := http.NewServeMux()
@@ -83,6 +88,8 @@ func (a *App) Routes(static fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/keys/rename", a.handleKeyRename)
 	mux.HandleFunc("POST /api/keys/delete", a.handleKeyDelete)
 	mux.HandleFunc("POST /api/keys/add/begin", a.handleKeyAddBegin)
+	mux.HandleFunc("GET /api/users", a.handleUsersList)
+	mux.HandleFunc("POST /api/users/hosts", a.handleSetHosts)
 	mux.HandleFunc("POST /api/invite", a.handleInvite)
 	mux.HandleFunc("POST /api/logout", a.handleLogout)
 	mux.HandleFunc("POST /api/logout-all", a.handleLogoutAll)
@@ -180,7 +187,7 @@ func (a *App) redeemTicket(w http.ResponseWriter, r *http.Request, fwdHost strin
 		return false
 	}
 	rec := a.store.Get(e.Username)
-	if rec == nil || len(rec.Credentials) == 0 || rec.Disputed {
+	if rec == nil || len(rec.Credentials) == 0 || rec.Disputed || !rec.MayAccess(fwdHost) {
 		return false
 	}
 	a.setServiceCookie(w, e.Username, fwdHost, rec.SessionEpoch, e.SvcCap)
@@ -201,7 +208,10 @@ func (a *App) checkServiceToken(r *http.Request, fwdHost string) (Token, bool) {
 		return Token{}, false
 	}
 	rec := a.store.Get(tok.Username)
-	if rec == nil || len(rec.Credentials) == 0 || rec.SessionEpoch != tok.Epoch || rec.Disputed {
+	// MayAccess re-checked live: editing a user's allowlist revokes their
+	// existing service cookies for de-listed hosts on the next request,
+	// same philosophy as epoch bumps.
+	if rec == nil || len(rec.Credentials) == 0 || rec.SessionEpoch != tok.Epoch || rec.Disputed || !rec.MayAccess(tok.Host) {
 		return Token{}, false
 	}
 	return tok, true
@@ -324,7 +334,7 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bad origin", http.StatusForbidden)
 		return
 	}
-	tok, _, ok := a.checkPortalSession(r)
+	tok, rec, ok := a.checkPortalSession(r)
 	if !ok {
 		jsonError(w, "not signed in", http.StatusUnauthorized)
 		return
@@ -340,7 +350,25 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bad redirect target", http.StatusBadRequest)
 		return
 	}
+	if !a.authorizedTarget(rec, target) {
+		jsonError(w, "not authorized for this service", http.StatusForbidden)
+		return
+	}
 	writeJSON(w, map[string]string{"redirect": a.ticketRedirect(tok.Username, target, svcCapFor(tok))})
+}
+
+// authorizedTarget applies the user's host allowlist to a redirect
+// target; portal-host targets are always fine (the portal is not a
+// gated app).
+func (a *App) authorizedTarget(rec *UserRecord, target string) bool {
+	u, err := url.Parse(target)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(u.Hostname(), a.cfg.PortalURL.Hostname()) {
+		return true
+	}
+	return rec.MayAccess(u.Host)
 }
 
 // svcCapFor derives the service-cookie expiry cap a session imposes on
@@ -473,7 +501,9 @@ func (a *App) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 		cap = time.Now().Add(publicSessionTTL)
 	}
 	redirect := a.safeRedirect(r.URL.Query().Get("rd"))
-	if redirect == "" {
+	if redirect == "" || !a.authorizedTarget(rec, redirect) {
+		// An rd outside the user's allowlist must not block the login
+		// itself — they land on the portal instead of the app.
 		redirect = a.cfg.PortalURL.String() + "/"
 	} else {
 		redirect = a.ticketRedirect(rec.Username, redirect, cap)
@@ -701,7 +731,7 @@ func (a *App) handleKeyAddBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "key name must be 1-64 characters", http.StatusBadRequest)
 		return
 	}
-	a.beginRegistration(w, rec.Username, rec.ID, req.KeyName, false, credentialDescriptors(rec))
+	a.beginRegistration(w, rec.Username, rec.ID, req.KeyName, false, nil, credentialDescriptors(rec))
 }
 
 // ---- enrollment (bootstrap or invite) --------------------------------------
@@ -733,6 +763,7 @@ func (a *App) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 	// invite codes minted by an admin — a standing shared secret that can
 	// silently add keys to existing accounts is not a thing here.
 	admin := false
+	var initialHosts []string
 	if a.store.UserCount() == 0 {
 		if a.cfg.BootstrapToken == "" ||
 			subtle.ConstantTimeCompare([]byte(req.Token), []byte(a.cfg.BootstrapToken)) != 1 {
@@ -757,6 +788,9 @@ func (a *App) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "enrollment refused", http.StatusForbidden)
 			return
 		}
+		// Scope a brand-new account before its first ticket: hosts carried
+		// by the invite apply only at record creation.
+		initialHosts = e.Hosts
 	}
 
 	var userID []byte
@@ -770,13 +804,13 @@ func (a *App) handleEnrollBegin(w http.ResponseWriter, r *http.Request) {
 			panic(err)
 		}
 	}
-	a.beginRegistration(w, req.Username, userID, req.KeyName, admin, exclusions)
+	a.beginRegistration(w, req.Username, userID, req.KeyName, admin, initialHosts, exclusions)
 }
 
 // beginRegistration starts the registration ceremony shared by enrollment
 // and self-service key addition. The whole point of stile: non-discoverable
 // credential, presence only. Browsers honour both on PIN-less keys.
-func (a *App) beginRegistration(w http.ResponseWriter, username string, userID []byte, keyName string, admin bool, exclusions []protocol.CredentialDescriptor) {
+func (a *App) beginRegistration(w http.ResponseWriter, username string, userID []byte, keyName string, admin bool, hosts []string, exclusions []protocol.CredentialDescriptor) {
 	opts, sess, err := a.wa.BeginRegistration(waUser{userID, username, nil},
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			AuthenticatorAttachment: protocol.CrossPlatform,
@@ -798,6 +832,7 @@ func (a *App) beginRegistration(w http.ResponseWriter, username string, userID [
 		UserID:   userID,
 		CredName: keyName,
 		Admin:    admin,
+		Hosts:    hosts,
 		Session:  *sess,
 	})
 	a.setCeremonyCookie(w, id)
@@ -834,7 +869,7 @@ func (a *App) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "enrollment failed", http.StatusBadRequest)
 		return
 	}
-	if err := a.store.AddCredential(p.Username, p.UserID, p.CredName, *cred, p.Admin); err != nil {
+	if err := a.store.AddCredential(p.Username, p.UserID, p.CredName, *cred, p.Admin, p.Hosts); err != nil {
 		log.Printf("store credential %s: %v", p.Username, err)
 		jsonError(w, "enrollment failed", http.StatusInternalServerError)
 		return
@@ -861,8 +896,9 @@ func (a *App) handleInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Username    string `json:"username"`
-		ActionToken string `json:"action_token"`
+		Username    string   `json:"username"`
+		ActionToken string   `json:"action_token"`
+		Hosts       []string `json:"hosts"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -882,11 +918,110 @@ func (a *App) handleInvite(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "account is disputed — clear the dispute first", http.StatusConflict)
 		return
 	}
-	code := a.codes.Put(codeEntry{Kind: "invite", Username: req.Username}, inviteTTL)
+	hosts, err := normalizeHosts(req.Hosts)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	code := a.codes.Put(codeEntry{Kind: "invite", Username: req.Username, Hosts: hosts}, inviteTTL)
 	link := a.cfg.PortalURL.String() + "/enroll?invite=" + url.QueryEscape(code) +
 		"&username=" + url.QueryEscape(req.Username)
 	log.Printf("invite minted for %q by %s (ip %s)", req.Username, tok.Username, clientIP(r))
 	writeJSON(w, map[string]any{"code": code, "link": link, "expires_in_minutes": int(inviteTTL.Minutes())})
+}
+
+// normalizeHosts lowercases, trims, de-dupes and validates an allowlist.
+func normalizeHosts(in []string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, h := range in {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || seen[h] {
+			continue
+		}
+		if !hostRe.MatchString(h) {
+			return nil, fmt.Errorf("invalid hostname %q", h)
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+// handleUsersList powers the admin UI: usernames, flags and allowlists.
+func (a *App) handleUsersList(w http.ResponseWriter, r *http.Request) {
+	_, rec, ok := a.checkPortalSession(r)
+	if !ok {
+		jsonError(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	if !a.isAdmin(rec) {
+		jsonError(w, "admin only", http.StatusForbidden)
+		return
+	}
+	type row struct {
+		Username     string   `json:"username"`
+		Admin        bool     `json:"admin"`
+		Disputed     bool     `json:"disputed"`
+		Keys         int      `json:"keys"`
+		AllowedHosts []string `json:"allowed_hosts"`
+	}
+	users := a.store.Users()
+	rows := make([]row, 0, len(users))
+	for _, u := range users {
+		rows = append(rows, row{
+			Username: u.Username, Admin: a.isAdmin(u), Disputed: u.Disputed,
+			Keys: len(u.Credentials), AllowedHosts: u.AllowedHosts,
+		})
+	}
+	writeJSON(w, map[string]any{"users": rows})
+}
+
+// handleSetHosts replaces a user's host allowlist: admin + fresh tap.
+// An empty list means "all hosts" — the back-compat default, so clearing
+// the field restores unrestricted access rather than denying everything.
+func (a *App) handleSetHosts(w http.ResponseWriter, r *http.Request) {
+	if !a.checkOrigin(r) {
+		jsonError(w, "bad origin", http.StatusForbidden)
+		return
+	}
+	tok, rec, ok := a.checkPortalSession(r)
+	if !ok {
+		jsonError(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	if !a.isAdmin(rec) {
+		jsonError(w, "admin only", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Username    string   `json:"username"`
+		Hosts       []string `json:"hosts"`
+		ActionToken string   `json:"action_token"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if !a.consumeAction(tok.Username, req.ActionToken, "set-hosts") {
+		jsonError(w, "step-up required", http.StatusForbidden)
+		return
+	}
+	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
+	if !usernameRe.MatchString(req.Username) {
+		jsonError(w, "username must match [a-z0-9._-]{1,32}", http.StatusBadRequest)
+		return
+	}
+	hosts, err := normalizeHosts(req.Hosts)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := a.store.SetAllowedHosts(req.Username, hosts); err != nil {
+		jsonError(w, "set failed", http.StatusBadRequest)
+		return
+	}
+	log.Printf("allowed_hosts for %q set to %v by %s (ip %s)", req.Username, hosts, tok.Username, clientIP(r))
+	writeJSON(w, map[string]any{"status": "saved", "allowed_hosts": hosts})
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {

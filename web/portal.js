@@ -269,6 +269,41 @@ $('forgetBtn').addEventListener('click', async () => {
   location.reload();
 });
 
+$('loadUsers').addEventListener('click', async () => {
+  let data;
+  try {
+    const res = await fetch('/api/users');
+    data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+  } catch (err) { showMsg($('msg'), err.message || String(err), 'error'); return; }
+  const box = $('usersBox');
+  box.textContent = '';
+  for (const u of data.users) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const name = document.createElement('span');
+    name.textContent = u.username + (u.admin ? ' ★' : '') + (u.disputed ? ' ❄' : '') + ' (' + u.keys + ')';
+    name.style.minWidth = '7rem';
+    const hosts = document.createElement('input');
+    hosts.value = (u.allowed_hosts || []).join(', ');
+    hosts.placeholder = 'all hosts';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'mini';
+    save.textContent = 'Save';
+    save.addEventListener('click', async () => {
+      const list = hosts.value.split(',').map(h => h.trim()).filter(Boolean);
+      try {
+        const action = await stepUp('set-hosts');
+        await postJSON('/api/users/hosts', { username: u.username, hosts: list, action_token: action });
+        showMsg($('msg'), 'Hosts for "' + u.username + '" saved' + (list.length ? '.' : ' (all hosts).'), 'ok');
+      } catch (err) { showMsg($('msg'), err.message || String(err), 'error'); }
+    });
+    row.append(name, hosts, save);
+    box.append(row);
+  }
+});
+
 $('disarmForm').addEventListener('submit', async ev => {
   ev.preventDefault();
   const username = $('disarmUser').value.trim().toLowerCase();
@@ -331,9 +366,10 @@ $('inviteForm').addEventListener('submit', async ev => {
   ev.preventDefault();
   const username = $('inviteUser').value.trim().toLowerCase();
   if (!username) return;
+  const hosts = $('inviteHosts').value.split(',').map(h => h.trim()).filter(Boolean);
   try {
     const action = await stepUp('invite');
-    const inv = await postJSON('/api/invite', { username, action_token: action });
+    const inv = await postJSON('/api/invite', { username, hosts, action_token: action });
     $('inviteLink').value = inv.link;
     $('inviteOut').classList.remove('hidden');
     $('inviteNote').textContent = 'Single use, expires in ' + inv.expires_in_minutes + ' minutes.';

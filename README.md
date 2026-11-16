@@ -38,6 +38,26 @@ Nothing stile mints is ever a domain-wide bearer token:
    change, no restart) and every outstanding session for that user dies
    within one request. Deleting the user works too.
 
+## Authorization: per-user host allowlists
+
+Authentication answers "is this an enrolled human?"; authorization
+answers "may *this* human cross at *this* fence?" Each user can carry an
+`allowed_hosts` list — exact hostnames, matched against
+`X-Forwarded-Host`. **Empty or absent means every gated host**, which
+keeps single-operator deployments zero-config and is why clearing the
+field in the admin UI restores access rather than denying everything.
+
+The list is enforced in three places: ticket minting (the portal refuses
+to mint for a de-listed host), ticket redemption, and every service
+cookie check — so **editing a user's allowlist revokes their existing
+sessions on de-listed hosts at the next request**, the same live-policy
+philosophy as epoch bumps. An unauthorized post-login redirect falls back
+to the portal rather than blocking the login.
+
+Admins manage allowlists from the portal (step-up gated, like every
+sensitive action), and **invites can carry an initial allowlist**, so a
+new user is scoped before their first ticket ever mints.
+
 ## Threat model — read this before using it
 
 The key tap defends against **remote** attacks: credential stuffing,

@@ -49,7 +49,7 @@ func testApp(t *testing.T) (*App, http.Handler) {
 func addFakeUser(t *testing.T, app *App, username string) {
 	t.Helper()
 	cred := webauthn.Credential{ID: []byte("cred-" + username), PublicKey: []byte("pk")}
-	if err := app.store.AddCredential(username, []byte("handle-"+username), "test key", cred, false); err != nil {
+	if err := app.store.AddCredential(username, []byte("handle-"+username), "test key", cred, false, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -143,7 +143,7 @@ func TestStorePersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	cred := webauthn.Credential{ID: []byte("id1"), PublicKey: []byte("pk1")}
-	if err := s1.AddCredential("ada", []byte("handle"), "main", cred, true); err != nil {
+	if err := s1.AddCredential("ada", []byte("handle"), "main", cred, true, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,10 +163,10 @@ func TestStorePersistence(t *testing.T) {
 func TestStoreHandleMismatch(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "users.json"))
 	cred := webauthn.Credential{ID: []byte("id1")}
-	if err := s.AddCredential("ada", []byte("handle"), "a", cred, false); err != nil {
+	if err := s.AddCredential("ada", []byte("handle"), "a", cred, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddCredential("ada", []byte("other"), "b", cred, false); err == nil {
+	if err := s.AddCredential("ada", []byte("other"), "b", cred, false, nil); err == nil {
 		t.Fatal("accepted a second credential under a different user handle")
 	}
 }
@@ -176,7 +176,7 @@ func TestStoreHandleMismatch(t *testing.T) {
 func TestStoreExternalEditReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "users.json")
 	s, _ := OpenStore(path)
-	if err := s.AddCredential("ada", []byte("handle"), "main", webauthn.Credential{ID: []byte("id1")}, false); err != nil {
+	if err := s.AddCredential("ada", []byte("handle"), "main", webauthn.Credential{ID: []byte("id1")}, false, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -208,8 +208,8 @@ func TestStoreExternalEditReload(t *testing.T) {
 
 func TestStoreDeleteAndRename(t *testing.T) {
 	s, _ := OpenStore(filepath.Join(t.TempDir(), "users.json"))
-	s.AddCredential("ada", []byte("h"), "a", webauthn.Credential{ID: []byte("id1")}, false)
-	s.AddCredential("ada", []byte("h"), "b", webauthn.Credential{ID: []byte("id2")}, false)
+	s.AddCredential("ada", []byte("h"), "a", webauthn.Credential{ID: []byte("id1")}, false, nil)
+	s.AddCredential("ada", []byte("h"), "b", webauthn.Credential{ID: []byte("id2")}, false, nil)
 	if err := s.DeleteCredential("ada", []byte("id1")); err != nil {
 		t.Fatalf("delete with a spare failed: %v", err)
 	}
@@ -682,7 +682,7 @@ func TestInviteMintingGates(t *testing.T) {
 func TestKeyDeleteRequiresStepUp(t *testing.T) {
 	app, h := testApp(t)
 	addFakeUser(t, app, "ada")
-	app.store.AddCredential("ada", []byte("handle-ada"), "spare", webauthn.Credential{ID: []byte("id2")}, false)
+	app.store.AddCredential("ada", []byte("handle-ada"), "spare", webauthn.Credential{ID: []byte("id2")}, false, nil)
 
 	// List to get ids.
 	r := httptest.NewRequest("GET", "/api/keys", nil)
@@ -855,7 +855,7 @@ func TestLogoutAllBumpsEpoch(t *testing.T) {
 func TestKeyDeleteBumpsEpochAndReissues(t *testing.T) {
 	app, h := testApp(t)
 	addFakeUser(t, app, "ada")
-	app.store.AddCredential("ada", []byte("handle-ada"), "spare", webauthn.Credential{ID: []byte("id2")}, false)
+	app.store.AddCredential("ada", []byte("handle-ada"), "spare", webauthn.Credential{ID: []byte("id2")}, false, nil)
 	svc := svcCookie(t, app, "ada", "app.example.com")
 
 	action := app.codes.Put(codeEntry{Kind: "action", Username: "ada", Op: "delete-key"}, time.Minute)
@@ -1391,5 +1391,202 @@ func TestFreezeEmptyBodyTolerated(t *testing.T) {
 	h.ServeHTTP(w2, r2)
 	if w2.Code != http.StatusBadRequest {
 		t.Fatalf("malformed body: want 400, got %d", w2.Code)
+	}
+}
+
+// ---- host authorization (v0.2) ----------------------------------------------
+
+func TestMayAccess(t *testing.T) {
+	r := &UserRecord{}
+	if !r.MayAccess("anything.example.com") {
+		t.Fatal("empty allowlist must mean all hosts")
+	}
+	r.AllowedHosts = []string{"app.example.com"}
+	if !r.MayAccess("APP.example.com") {
+		t.Fatal("match must be case-insensitive")
+	}
+	if r.MayAccess("other.example.com") {
+		t.Fatal("non-listed host allowed")
+	}
+}
+
+func TestHostPolicyEnforced(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "zhansi")
+	if err := app.store.SetAllowedHosts("zhansi", []string{"app.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Service cookie for a de-listed host: refused.
+	r := fwdReq("/verify", "other.example.com", "/")
+	r.Header.Set("Accept", "application/json")
+	r.AddCookie(svcCookie(t, app, "zhansi", "other.example.com"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("de-listed host cookie accepted: %d", w.Code)
+	}
+	// Listed host: fine.
+	r2 := fwdReq("/verify", "app.example.com", "/")
+	r2.AddCookie(svcCookie(t, app, "zhansi", "app.example.com"))
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("listed host refused: %d", w2.Code)
+	}
+
+	// Ticket mint for a de-listed host: 403; listed: 200.
+	mint := func(rd string) int {
+		body, _ := json.Marshal(map[string]string{"rd": rd})
+		rq := httptest.NewRequest("POST", "/api/ticket", bytes.NewReader(body))
+		rq.Header.Set("Content-Type", "application/json")
+		rq.Header.Set("Origin", "https://tap.example.com")
+		rq.AddCookie(portalCookie(t, app, "zhansi"))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, rq)
+		return rec.Code
+	}
+	if c := mint("https://other.example.com/x"); c != http.StatusForbidden {
+		t.Fatalf("mint for de-listed host: want 403, got %d", c)
+	}
+	if c := mint("https://app.example.com/x"); c != http.StatusOK {
+		t.Fatalf("mint for listed host: want 200, got %d", c)
+	}
+
+	// Redemption re-checks policy even for an already-minted ticket.
+	code := app.codes.Put(codeEntry{Kind: "ticket", Username: "zhansi", Host: "other.example.com"}, time.Minute)
+	r3 := fwdReq("/verify", "other.example.com", "/?"+ticketParam+"="+code)
+	r3.Header.Set("Accept", "application/json")
+	w3 := httptest.NewRecorder()
+	h.ServeHTTP(w3, r3)
+	if w3.Code != http.StatusUnauthorized {
+		t.Fatalf("de-listed ticket redeemed: %d", w3.Code)
+	}
+}
+
+// Editing the allowlist revokes existing service cookies live.
+func TestHostPolicyLiveRevocation(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "zhansi")
+	cookie := svcCookie(t, app, "zhansi", "app.example.com")
+
+	check := func() int {
+		r := fwdReq("/verify", "app.example.com", "/")
+		r.Header.Set("Accept", "application/json")
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if check() != http.StatusOK {
+		t.Fatal("unrestricted user refused")
+	}
+	app.store.SetAllowedHosts("zhansi", []string{"elsewhere.example.com"})
+	if check() != http.StatusUnauthorized {
+		t.Fatal("policy edit did not revoke the live service cookie")
+	}
+	// Clearing the list restores all-hosts.
+	app.store.SetAllowedHosts("zhansi", nil)
+	if check() != http.StatusOK {
+		t.Fatal("cleared allowlist did not restore access")
+	}
+}
+
+func TestInviteCarriesHosts(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	app.cfg.AdminUsers = []string{"admin"}
+
+	action := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
+	w := postAs(h, "/api/invite", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{"App.example.com ", "app.example.com"}, "action_token": action})
+	if w.Code != http.StatusOK {
+		t.Fatalf("invite with hosts: %d: %s", w.Code, w.Body)
+	}
+	var inv struct{ Code string }
+	json.Unmarshal(w.Body.Bytes(), &inv)
+
+	// Begin enrollment with the invite; the pending ceremony must carry
+	// the normalized (lowercased, de-duped) hosts.
+	w2 := postAs(h, "/api/enroll/begin", "https://tap.example.com", nil,
+		map[string]string{"token": inv.Code, "username": "zhansi", "key_name": "k"})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("enroll begin: %d: %s", w2.Code, w2.Body)
+	}
+	var cid string
+	for _, c := range w2.Result().Cookies() {
+		if c.Name == ceremonyCookie {
+			cid = c.Value
+		}
+	}
+	p, ok := app.pending.Take(cid)
+	if !ok || len(p.Hosts) != 1 || p.Hosts[0] != "app.example.com" {
+		t.Fatalf("pending hosts wrong: %+v", p.Hosts)
+	}
+
+	// Store level: hosts apply on create, never overwrite an existing record.
+	app.store.AddCredential("zhansi", []byte("h-z"), "k", webauthn.Credential{ID: []byte("z1")}, false, []string{"app.example.com"})
+	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 1 {
+		t.Fatalf("hosts not applied on create: %v", got)
+	}
+	app.store.AddCredential("zhansi", []byte("h-z"), "k2", webauthn.Credential{ID: []byte("z2")}, false, []string{"evil.example.com"})
+	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 1 || got[0] != "app.example.com" {
+		t.Fatalf("second credential overwrote hosts: %v", got)
+	}
+}
+
+func TestUsersAndSetHostsGates(t *testing.T) {
+	app, h := testApp(t)
+	addFakeUser(t, app, "admin")
+	addFakeUser(t, app, "zhansi")
+	app.cfg.AdminUsers = []string{"admin"}
+
+	// Listing: non-admin 403, admin 200.
+	get := func(user string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/users", nil)
+		r.AddCookie(portalCookie(t, app, user))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := get("zhansi"); w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin listed users: %d", w.Code)
+	}
+	if w := get("admin"); w.Code != http.StatusOK {
+		t.Fatalf("admin list: %d", w.Code)
+	}
+
+	// set-hosts: wrong-op token refused; right op applies; empty clears.
+	wrong := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "invite"}, time.Minute)
+	if w := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{"app.example.com"}, "action_token": wrong}); w.Code != http.StatusForbidden {
+		t.Fatalf("set-hosts with wrong-op token: %d", w.Code)
+	}
+	right := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "set-hosts"}, time.Minute)
+	if w := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{"app.example.com"}, "action_token": right}); w.Code != http.StatusOK {
+		t.Fatalf("set-hosts refused: %d: %s", w.Code, w.Body)
+	}
+	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 1 || got[0] != "app.example.com" {
+		t.Fatalf("hosts not applied: %v", got)
+	}
+	clear := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "set-hosts"}, time.Minute)
+	if w := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{}, "action_token": clear}); w.Code != http.StatusOK {
+		t.Fatalf("clear refused: %d", w.Code)
+	}
+	if got := app.store.Get("zhansi").AllowedHosts; len(got) != 0 {
+		t.Fatalf("clear did not restore all-hosts: %v", got)
+	}
+	// Invalid hostname refused (after step-up, so the token burns — fine).
+	bad := app.codes.Put(codeEntry{Kind: "action", Username: "admin", Op: "set-hosts"}, time.Minute)
+	if w := postAs(h, "/api/users/hosts", "https://tap.example.com",
+		[]*http.Cookie{portalCookie(t, app, "admin")},
+		map[string]any{"username": "zhansi", "hosts": []string{"bad host!"}, "action_token": bad}); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid hostname accepted: %d", w.Code)
 	}
 }
