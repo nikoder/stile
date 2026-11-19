@@ -354,8 +354,25 @@ $('addKey').addEventListener('click', async () => {
       + ' — Step 1 needs a key that is already enrolled; the NEW key only comes in Step 2.', 'error');
     return;
   }
+  // The second WebAuthn ceremony needs its OWN user gesture: the step-up
+  // get() consumed this click's transient activation, and Safari/iOS and
+  // Firefox private windows refuse a gestureless create() with
+  // NotAllowedError. So step 2 arms a button instead of auto-launching.
+  pendingAdd = { action, name };
+  $('addKeyGo').classList.remove('hidden');
+  $('addKey').classList.add('hidden');
+  showMsg($('msg'), 'Step 1 done. Insert or ready the NEW key, then press "Enroll NEW key". (You have ~2 minutes.)', 'ok');
+});
+
+let pendingAdd = null;
+$('addKeyGo').addEventListener('click', async () => {
+  if (!pendingAdd) return;
+  const { action, name } = pendingAdd;
+  pendingAdd = null;
+  $('addKeyGo').classList.add('hidden');
+  $('addKey').classList.remove('hidden');
   try {
-    showMsg($('msg'), 'Step 2 of 2: now insert & tap the NEW key…');
+    showMsg($('msg'), 'Step 2 of 2: tap the NEW key…');
     const options = await postJSON('/api/keys/add/begin', { action_token: action, key_name: name });
     const result = await createKey(options);
     await sendResult('/api/enroll/finish', result);
