@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    .rail { stroke: #6b6b6b; } .solid { fill: #1a1a1a; }
+    @media (prefers-color-scheme: dark) {
+      .rail { stroke: #9a9892; } .solid { fill: #e8e6e3; }
+    }
+  </style>
+  <path class="rail" fill="none" stroke-width="1.4" d="M10 26.5 L20.5 5.5 M11.25 30.5 L22 9"/>
+  <path class="solid" fill-rule="evenodd" d="M14.4 11.5 H17.6 V28 H14.4 Z M16 13.2 A1.3 1.3 0 1 0 16 15.8 A1.3 1.3 0 1 0 16 13.2 Z M16 19.7 A1.3 1.3 0 1 0 16 22.3 A1.3 1.3 0 1 0 16 19.7 Z"/>
+  <rect class="solid" x="2.5" y="17.5" width="8.5" height="3.2" rx="1.6"/>
+  <rect class="solid" x="11.75" y="8.5" width="8.5" height="3.2" rx="1.6"/>
+  <rect class="solid" x="21" y="17.5" width="8.5" height="3.2" rx="1.6"/>
+  <path class="rail" fill="none" stroke-width="1.4" d="M10 26.5 L16 14.5 M11.25 30.5 L16 21"/>
+</svg>
